@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"/home/ud3d4/Desktop/Projects/NIPS 26/readme\"*)"
+    ]
+  }
+}
