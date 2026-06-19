@@ -1,163 +1,235 @@
 # IG-JEPA: Image-Graph Joint Embedding Predictive Architecture
 
-Self-supervised representation learning on graph-structured image decompositions. Images are converted to graphs via graph-minor pooling, enriched with DINO patch embeddings, then trained with a JEPA objective (student-teacher with topology-aware masking).
+Self-supervised representation learning on graph-structured image decompositions. Images are converted to superpixel graphs via Rust-accelerated graph-minor pooling, enriched with frozen DINO ViT-S/16 patch embeddings, then trained with a graph JEPA objective featuring per-graph BFS subgraph masking, context-neighbor prediction, and graph-level BYOL alignment.
+
+## Pipeline Overview
+
+```
+Raw Image (H x W x 3)
+    |
+    v
+[1] Graph-Minor Pooling (Rust: fastloops)
+    - Flood-fill merge similar pixels
+    - Cut dissimilar boundaries
+    - Delete too-small / too-large regions
+    -> Superpixel graph (~800 nodes for 96x96)
+    |
+    v
+[2] DINO Feature Extraction (frozen ViT-S/16)
+    - Image -> 14x14 patch grid (384-dim each)
+    - Each superpixel node: centroid -> nearest DINO patch
+    |
+    v
+[3] Node Features (398-dim per node)
+    - 14-dim boundary: RGB mean/std, log(area), centroid,
+      bbox dims, compactness, boundary ratio, relative area
+    - 384-dim DINO: semantic patch embedding
+    |
+    v
+[4] IG-JEPA Self-Supervised Training
+    - Teacher (EMA): encodes full clean graph
+    - Student: encodes masked + augmented graph
+    - Per-graph BFS masking: connected subgraph (40% nodes)
+    - Context-neighbor prediction (no info leak)
+    - Graph-level BYOL + VICReg regularization
+    |
+    v
+[5] Evaluation
+    - Freeze encoder, extract graph-level embeddings (mean pool)
+    - Linear probe (LogReg) / MLP probe on labeled data
+    - Label efficiency at 1%, 2%, 5%, 10%, 20%, 50%, 100%
+```
+
+## Architecture
+
+**GraphTransformerEncoder** (3.26M trainable params):
+- Input projection: 398 -> 384
+- 4 layers of multi-head TransformerConv (4 heads, 96 dim/head)
+- LayerNorm + residual per layer
+- Global residual: output = encoder(x) + proj(x)  (preserves input features)
+
+**IG-JEPA Training Objective** (3 losses):
+
+| Loss | Weight | Description |
+|------|:------:|-------------|
+| Prediction | 1.0 | Student predicts teacher's masked node embeddings from context neighbor aggregation |
+| BYOL | 1.0 | Student graph embedding (via predictor) matches teacher graph embedding |
+| VICReg Variance | 25.0 | Prevents embedding collapse (maintains unit std) |
+| VICReg Covariance | 1.0 | Decorrelates embedding dimensions |
+
+**Key Design Decisions:**
+- **Per-graph BFS masking**: Each graph in the batch gets its own connected subgraph mask via BFS (not random nodes). This teaches spatial part-whole reasoning.
+- **Context-neighbor prediction**: Masked nodes are disconnected from the student graph (no info leak through attention). Predictions come from aggregating context neighbors' embeddings via the original edge structure.
+- **Global residual**: Preserves DINO features through the network, preventing information destruction.
+- **Frozen DINO**: No fine-tuning of the vision backbone. The graph framework adds structural reasoning on top.
 
 ## Project Structure
 
 ```
 .
-├── src/                    # All runnable scripts
-├── fastloops/              # Rust graph-minor pooling kernel (PyO3)
-├── signals/                # JSON result files from completed experiments
-├── reports/                # Technical report, figures, result tables
-├── data/                   # Medical datasets (LiTS, Pancreas)
+├── src/
+│   └── run_dino.py              # Complete pipeline: graph build + train + eval
+├── fastloops/
+│   └── src/lib.rs               # Rust kernel: graph-minor pooling + BFS masking
+├── signals/                     # JSON result files from completed experiments
+├── archive/
+│   ├── v1_src/                  # Previous experiment scripts (10 files)
+│   ├── v1_signals/              # Previous result JSONs
+│   └── v1_reports/              # Previous technical reports
 └── README.md
 ```
 
-## Prerequisites
+## Setup
 
 ```bash
 # Python dependencies
 pip install torch torchvision torch_geometric
-pip install scikit-learn scipy numpy rdflib
+pip install scikit-learn scipy numpy maturin
 
-# Build the Rust kernel (required by all scripts except run_kg_jepa.py)
+# Build the Rust kernel
 cd fastloops
-pip install maturin
 maturin develop --release
 cd ..
 ```
 
-The `fastloops` module provides `merge_and_cut()` — a fast Rust kernel that performs flood-fill merge, gradient cut, and noise deletion to convert images into supernodes.
+The `fastloops` Rust module provides:
+- `merge_and_cut()`: Graph-minor pooling (image -> superpixel adjacency + features)
+- `subgraph_mask()`: BFS-based connected subgraph masking for JEPA training
 
-## Scripts — What Each Does
-
-### Core Pipeline
-
-| Script | Paper Table | Description |
-|--------|-------------|-------------|
-| `run_dino.py` | Table 1 | **Main pipeline.** Loads images, extracts DINO features, builds 398-dim graphs via graph-minor pooling, trains IG-JEPA, evaluates with linear probe. Supports CIFAR-10, STL-10, TinyImageNet. |
-| `run_lowlabel.py` | Table 2 | **Low-label transfer.** Reuses cached graphs from `run_dino.py`. Trains JEPA once, then evaluates linear probe at 1%, 5%, 10%, and 100% label fractions. |
-| `run_table3_all.py` | Table 3 (CIFAR-10, TinyImageNet) | **Graphization ablation.** Compares three graph construction methods (proposed graph-minor, SLIC superpixel, patch kNN) on CIFAR-10 and TinyImageNet. |
-| `run_ablation_table3.py` | Table 3 (STL-10) | **Graphization ablation on STL-10.** Same comparisons as above plus S=3 hierarchy variant, run on STL-10. |
-| `run_table4.py` | Table 4 | **Efficiency benchmark.** Measures token count, GPU memory, throughput (images/sec), and parameter count. No training — just forward-pass profiling. |
-
-### Medical / Knowledge Graph
-
-| Script | Paper Table | Description |
-|--------|-------------|-------------|
-| `run_kg_jepa.py` | KG Results | **Clinical knowledge graph JEPA.** Builds KGs from LiTS/Pancreas medical data (RDF schema), applies JEPA for tumor burden classification and size regression. Does not require `fastloops`. |
-| `run_medical_v2.py` | Medical Results | **Medical CT segmentation.** Per-slice graph construction with liver-specific CT windowing, multi-slice context features, MLP probe with Dice loss. Targets LiTS liver and Pancreas segmentation. |
-
-### Ablations / Extensions
-
-| Script | Description |
-|--------|-------------|
-| `run_graphonly_enriched.py` | **Graph-only ablation (no DINO).** Enriches 14-dim boundary features to ~45-dim with color histograms, texture stats, and WL hash features. Tests how far graph structure alone can go. |
-| `run_gap_close.py` | **Experimental.** Larger model (hid=512, 6 layers), graph augmentation (edge drop + feature noise), attention pooling. Attempts to close accuracy gap on smaller-resolution datasets. |
-| `run_imagenet100.py` | **ImageNet-100 benchmark.** Same pipeline as `run_dino.py` applied to 100-class ImageNet subset from HuggingFace. |
-
-### Utility
-
-| Script | Description |
-|--------|-------------|
-| `generate_medical_figure.py` | **Figure generation.** Produces the medical qualitative figure (graph-minor pooling on CT slices). Designed to run on a local machine with access to MICCAI data. |
-
-## Run Order
-
-The scripts are mostly independent — each is self-contained with its own model definition, training loop, and evaluation. However, `run_lowlabel.py` depends on cached graphs.
-
-### Step 1: Build fastloops
+## Running Experiments
 
 ```bash
-cd fastloops && maturin develop --release && cd ..
+# STL-10 (standard SSL protocol: 100K unlabeled pretrain, 5K/8K labeled eval)
+python src/run_dino.py --dataset stl10 --unlabeled --gpu 0 --epochs 100 --bs 64 --hid 384
+
+# CIFAR-10 (50K train pretrain, 10K test eval)
+python src/run_dino.py --dataset cifar10 --gpu 0 --epochs 200 --bs 64 --hid 384
+
+# TinyImageNet (100K train pretrain, 10K test eval)
+python src/run_dino.py --dataset tinyimagenet --gpu 1 --epochs 200 --bs 64 --hid 384
 ```
 
-### Step 2: Main results (Table 1)
+Graphs are cached to `/scratch/ud3d4/igjepa_cache/` (persistent) on first run. Subsequent runs skip graph construction and go directly to training.
 
-```bash
-# Each dataset runs independently. Results saved to signals/.
-python src/run_dino.py --dataset cifar10 --gpu 0
-python src/run_dino.py --dataset stl10 --gpu 0
-python src/run_dino.py --dataset tinyimagenet --gpu 0
-```
+### Key Arguments
 
-This caches the 398-dim graphs to `/tmp/igjepa_cache/` for reuse by downstream scripts.
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dataset` | required | `cifar10`, `stl10`, or `tinyimagenet` |
+| `--gpu` | 0 | CUDA device index |
+| `--epochs` | 100 | Training epochs |
+| `--hid` | 384 | Hidden dimension (matches DINO patch dim) |
+| `--bs` | 32 | Batch size |
+| `--n_layers` | 4 | Transformer layers |
+| `--n_heads` | 4 | Attention heads |
+| `--lr` | 1e-4 | Learning rate (cosine decay to 1e-6) |
+| `--unlabeled` | flag | Use STL-10 100K unlabeled split for pretraining |
 
-### Step 3: Low-label transfer (Table 2)
+## Results
 
-Requires cached graphs from Step 2.
+### STL-10 (100K unlabeled pretrain, 3.26M params)
 
-```bash
-python src/run_lowlabel.py --dataset cifar10 --gpu 0
-python src/run_lowlabel.py --dataset tinyimagenet --gpu 0
-```
+| Method | Params | Accuracy | F1 (wtd) |
+|--------|:------:|:--------:|:--------:|
+| SimCLR (ResNet-50) | 25M | ~85% | - |
+| BYOL (ResNet-50) | 25M | ~87% | - |
+| Raw DINO + LogReg | - | 89.91% | 89.93% |
+| **IG-JEPA + LogReg** | **3.26M** | **94.09%** | **94.10%** |
+| IG-JEPA + MLP | 3.26M | 93.17% | - |
 
-### Step 4: Ablations (Table 3)
+### Label Efficiency (STL-10)
 
-Can run in parallel with Step 2 — builds its own graphs.
+| Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
+|:------:|----:|:------------:|:----------------:|:---:|
+| 1% | 50 | 54.77% | **67.74%** | +12.96% |
+| 2% | 100 | 66.62% | **78.22%** | +11.60% |
+| 5% | 250 | 76.54% | **85.97%** | +9.44% |
+| 10% | 500 | 82.29% | **89.60%** | +7.31% |
+| 20% | 1000 | 85.69% | **92.11%** | +6.42% |
+| 50% | 2500 | 88.81% | **93.75%** | +4.94% |
+| 100% | 5000 | 89.91% | **94.09%** | +4.18% |
 
-```bash
-python src/run_table3_all.py --dataset cifar10 --gpu 0
-python src/run_table3_all.py --dataset tinyimagenet --gpu 0
-python src/run_ablation_table3.py --gpu 0   # STL-10 variants
-```
+JEPA with 500 labels (89.6%) matches raw features with all 5000 labels (89.9%) -- **10x label efficiency**.
 
-### Step 5: Efficiency (Table 4)
+### CIFAR-10 (50K train pretrain, 3.26M params)
 
-No training required. Quick profiling run.
+| Method | Accuracy | F1 (wtd) | Precision | Recall |
+|--------|:--------:|:--------:|:---------:|:------:|
+| Raw DINO + LogReg | 87.57% | 87.54% | 87.53% | 87.57% |
+| **IG-JEPA + LogReg** | **88.27%** | **88.24%** | **88.23%** | **88.27%** |
+| IG-JEPA + MLP | 89.46% | - | - | - |
 
-```bash
-python src/run_table4.py --dataset cifar10 --gpu 0
-python src/run_table4.py --dataset tinyimagenet --gpu 0
-```
+### Label Efficiency (CIFAR-10)
 
-### Step 6: Medical experiments (independent)
+| Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
+|:------:|-----:|:------------:|:----------------:|:---:|
+| 1% | 500 | 73.72% | **74.06%** | +0.34% |
+| 2% | 1000 | 77.64% | **78.79%** | +1.15% |
+| 5% | 2500 | 79.68% | **82.17%** | +2.49% |
+| 10% | 5000 | 80.46% | **83.78%** | +3.32% |
+| 20% | 10000 | 82.51% | **84.91%** | +2.40% |
+| 50% | 25000 | 85.97% | **86.94%** | +0.97% |
+| 100% | 50000 | 87.57% | **88.27%** | +0.70% |
 
-Requires medical data in `data/`.
+### TinyImageNet (100K train pretrain, 200 classes, 3.26M params)
 
-```bash
-python src/run_kg_jepa.py --dataset lits --gpu 0
-python src/run_kg_jepa.py --dataset pancreas --gpu 0
-python src/run_medical_v2.py --dataset lits --gpu 0
-python src/run_medical_v2.py --dataset pancreas --gpu 0
-```
+| Method | Accuracy | F1 (wtd) | Precision | Recall |
+|--------|:--------:|:--------:|:---------:|:------:|
+| Raw DINO + LogReg | 57.87% | 57.56% | 57.69% | 57.87% |
+| **IG-JEPA + LogReg** | **58.85%** | **58.58%** | **58.84%** | **58.85%** |
+| IG-JEPA + MLP | 53.82% | - | - | - |
 
-### Optional: Ablations and extensions
+### Label Efficiency (TinyImageNet)
 
-```bash
-python src/run_graphonly_enriched.py --gpu 0       # No-DINO ablation
-python src/run_gap_close.py --dataset cifar10 --gpu 0  # Experimental V2
-python src/run_imagenet100.py --gpu 0              # ImageNet-100
-```
+| Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
+|:------:|-----:|:------------:|:----------------:|:---:|
+| 1% | 1000 | 25.21% | **25.95%** | +0.74% |
+| 2% | 2000 | 33.04% | **33.64%** | +0.60% |
+| 5% | 5000 | 40.95% | **41.77%** | +0.82% |
+| 10% | 10000 | 45.21% | **46.29%** | +1.08% |
+| 20% | 20000 | 47.42% | **49.67%** | +2.25% |
+| 50% | 50000 | 51.53% | **55.61%** | +4.08% |
+| 100% | 100000 | 57.87% | **58.85%** | +0.98% |
 
-## Output
+### Summary Across Datasets
 
-All scripts write JSON results to `signals/`. Example output from `run_dino.py`:
+| Dataset | Classes | Raw+LR | JEPA+LR | Gap | Best Label Eff. |
+|---------|:-------:|:------:|:-------:|:---:|:---------------:|
+| STL-10 | 10 | 89.91% | **94.09%** | +4.18% | +12.96% (1%) |
+| CIFAR-10 | 10 | 87.57% | **88.27%** | +0.70% | +3.32% (10%) |
+| TinyImageNet | 200 | 57.87% | **58.85%** | +0.98% | +4.08% (50%) |
+
+IG-JEPA outperforms raw features on every dataset at every label fraction, with 3.26M trainable parameters.
+
+## Output Format
+
+Results are saved to `signals/done_{dataset}_dino.json`:
 
 ```json
 {
-  "acc_raw": 0.0985,
-  "acc_jepa_lr": 0.6501,
-  "acc_jepa_mlp": 0.6124,
-  "dataset": "cifar10",
-  "params": 2511104
+  "acc_raw": 0.8991,
+  "acc_jepa_lr": 0.9409,
+  "acc_jepa_mlp": 0.9317,
+  "f1_raw": 0.8993,
+  "f1_jepa": 0.9410,
+  "precision_raw": 0.8997,
+  "precision_jepa": 0.9411,
+  "recall_raw": 0.8991,
+  "recall_jepa": 0.9409,
+  "confusion_matrix": [...],
+  "label_efficiency": {
+    "0.01": {"raw": 0.5477, "jepa": 0.6774, "n": 50},
+    ...
+  },
+  "dataset": "stl10",
+  "params": 5782656
 }
 ```
 
-- `acc_raw`: Linear probe on raw mean-pooled features (no JEPA)
-- `acc_jepa_lr`: Linear probe on JEPA embeddings
-- `acc_jepa_mlp`: MLP probe on JEPA embeddings
+## Graph-Minor Pooling Parameters
 
-## Key Hyperparameters
-
-| Parameter | Value | Set in |
-|-----------|-------|--------|
-| Hidden dim | 256 | `--hid` (all scripts) |
-| Layers | 4 | Model class |
-| Mask ratio | 40% | Model class |
-| EMA momentum | 0.996 | Model class |
-| Learning rate | 1e-4 | `--lr` |
-| Batch size | 32 | `--bs` |
-| Epochs | 100 | `--epochs` |
-| Loss weights | pred + 25*var + 1*cov | Model forward() |
+| Dataset | Image Size | merge_dist | cut_dist | del_small | del_large | Avg Nodes |
+|---------|:----------:|:----------:|:--------:|:---------:|:---------:|:---------:|
+| CIFAR-10 | 32x32 | 5 | 80 | 0 | 1024 | ~150 |
+| STL-10 | 96x96 | 8 | 80 | 2 | 9216 | ~800 |
+| TinyImageNet | 64x64 | 6 | 80 | 1 | 4096 | ~400 |

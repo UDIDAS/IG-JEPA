@@ -1,0 +1,11 @@
+{
+  "dataset": "lits",
+  "task": "tumor_burden_classification",
+  "acc_jepa": 0.9771428571428571,
+  "f1_jepa": 0.9768053181386515,
+  "acc_raw": 0.9942857142857143,
+  "volume_mae": 164.0085906982422,
+  "volume_rel_mae": 0.03550865303123156,
+  "n_train": 696,
+  "n_test": 175
+}

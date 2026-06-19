@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import fastloops
 
 EDGE_MERGED = 0b0001_0000
-CACHE_DIR = "/tmp/igjepa_cache"
+CACHE_DIR = "/scratch/ud3d4/igjepa_cache"  # Persistent across restarts
 
 KERNELS = {
     "cifar10": {"merge_distance": 5, "cut_distance": 80,
@@ -119,7 +119,14 @@ def build_graph_with_dino(img_np, kernel, dino_grid):
     return Data(x=torch.from_numpy(nf), edge_index=torch.tensor(np.stack([s,d]), dtype=torch.long), num_nodes=N)
 
 
-# Model (same as run_tier1.py)
+# Model — IG-JEPA v2
+# Design principles:
+#   1. Student sees context-only graph (edges to masked nodes REMOVED — no info leak)
+#   2. Predictor uses context NEIGHBOR aggregation for masked nodes (not encoder output
+#      at masked positions, which would be a constant since they're disconnected)
+#   3. Global residual in encoder preserves input features
+#   4. Graph-level BYOL loss forces globally discriminative representations
+
 class GraphTransformerEncoder(nn.Module):
     def __init__(self, in_dim, hid, n_layers=4, n_heads=4, dropout=0.1):
         super().__init__()
@@ -130,44 +137,98 @@ class GraphTransformerEncoder(nn.Module):
             self.norms.append(nn.LayerNorm(hid))
         self.dropout = nn.Dropout(dropout)
     def forward(self, x, edge_index):
-        x = self.input_proj(x)
+        h0 = self.input_proj(x)
+        h = h0
         for conv, norm in zip(self.convs, self.norms):
-            x = norm(conv(x, edge_index) + x); x = F.gelu(x); x = self.dropout(x)
-        return x
+            h = norm(conv(h, edge_index) + h); h = F.gelu(h); h = self.dropout(h)
+        return h + h0  # Global residual — preserves projected input features
 
 class IGJEPA(nn.Module):
-    def __init__(self, in_dim, hid=256, n_layers=4, n_heads=4, mask_ratio=0.4, ema=0.996):
+    def __init__(self, in_dim, hid=384, n_layers=4, n_heads=4, mask_ratio=0.4, ema=0.996):
         super().__init__()
         self.mask_ratio, self.ema_m, self.hid = mask_ratio, ema, hid
+        # Student encoder + EMA teacher
         self.enc = GraphTransformerEncoder(in_dim, hid, n_layers, n_heads)
         self.tgt = copy.deepcopy(self.enc)
         for p in self.tgt.parameters(): p.requires_grad = False
+        # Node-level predictor: takes aggregated context neighbor embeddings → predicts target
         self.pred = nn.Sequential(nn.Linear(hid,hid),nn.GELU(),nn.Linear(hid,hid),nn.GELU(),nn.Linear(hid,hid))
+        # Graph-level predictor (BYOL — student predicts teacher's graph embedding)
+        self.graph_pred = nn.Sequential(nn.Linear(hid,hid),nn.GELU(),nn.Linear(hid,hid))
+
     @torch.no_grad()
     def ema_update(self):
-        for a, b in zip(self.enc.parameters(), self.tgt.parameters()): b.data.mul_(self.ema_m).add_(a.data, alpha=1-self.ema_m)
-    def topology_mask(self, ei, N):
-        nm = max(1, int(N * self.mask_ratio))
-        adj = [[] for _ in range(N)]
-        for s, d in zip(ei[0].cpu().tolist(), ei[1].cpu().tolist()): adj[s].append(d)
-        masked = set(); q = [random.randint(0, N-1)]
-        while len(masked) < nm and q:
-            n = q.pop(0)
-            if n not in masked: masked.add(n); nbrs = adj[n]; random.shuffle(nbrs); q.extend(nbrs)
-        if len(masked) < nm:
-            rem = list(set(range(N)) - masked); random.shuffle(rem); masked.update(rem[:nm-len(masked)])
-        return torch.tensor(list(masked), dtype=torch.long, device=ei.device)
+        for a, b in zip(self.enc.parameters(), self.tgt.parameters()):
+            b.data.mul_(self.ema_m).add_(a.data, alpha=1-self.ema_m)
+
     def forward(self, batch):
         x, ei = batch.x, batch.edge_index; N = x.size(0)
-        mi = self.topology_mask(ei, N)
-        with torch.no_grad(): target = F.layer_norm(self.tgt(x, ei)[mi], [self.hid])
-        xc = x.clone(); xc[mi] = 0; c = self.enc(xc, ei)
-        pred = F.layer_norm(self.pred(c[mi]), [self.hid])
-        pl = F.smooth_l1_loss(pred, target)
-        std = torch.sqrt(c.var(dim=0)+1e-4); vl = F.relu(1.0-std).mean()
-        cm = c-c.mean(0); cov = (cm.T@cm)/max(N-1,1)
-        od = cov.flatten()[1:].view(self.hid-1,self.hid+1)[:,:-1].flatten(); cl = (od**2).sum()/self.hid
-        return pl+25*vl+1*cl, {"pred":pl.item(),"std":std.mean().item()}
+        dev = ei.device
+
+        # Per-graph BFS subgraph masking — each graph gets its own connected mask
+        masked_flag = torch.zeros(N, dtype=torch.bool, device=dev)
+        graph_ids = batch.batch
+        unique_graphs = graph_ids.unique()
+        ei_np_src, ei_np_dst = ei[0].cpu().numpy(), ei[1].cpu().numpy()
+        for gid in unique_graphs:
+            node_mask = (graph_ids == gid)
+            g_nodes = node_mask.nonzero(as_tuple=True)[0]
+            g_N = g_nodes.size(0)
+            if g_N < 2: continue
+            # Get edges within this graph
+            g_start = g_nodes[0].item()
+            g_edge_mask = node_mask[ei[0]] & node_mask[ei[1]]
+            g_src = ei_np_src[g_edge_mask.cpu().numpy()] - g_start
+            g_dst = ei_np_dst[g_edge_mask.cpu().numpy()] - g_start
+            nm = max(1, int(g_N * self.mask_ratio))
+            mi_local, _, _ = fastloops.subgraph_mask(g_src, g_dst, g_N, nm, random.randint(0, g_N-1))
+            masked_flag[g_nodes[mi_local]] = True
+        mi = masked_flag.nonzero(as_tuple=True)[0]
+        # Build context edge index (remove edges touching masked nodes)
+        edge_keep = ~(masked_flag[ei[0]] | masked_flag[ei[1]])
+        ctx_ei = ei[:, edge_keep]
+
+        # === Teacher: clean full graph ===
+        with torch.no_grad():
+            tgt_all = self.tgt(x, ei)
+            target = F.layer_norm(tgt_all[mi], [self.hid])
+            tgt_graph = global_mean_pool(tgt_all, batch.batch)
+
+        # === Student: context-only graph (edges to masked nodes removed) ===
+        xc = x.clone(); xc[mi] = 0  # Zero masked features (they're disconnected anyway)
+        # Edge augmentation on context edges only
+        ei_aug = ctx_ei[:, torch.rand(ctx_ei.size(1), device=dev) > 0.15]
+        c = self.enc(xc, ei_aug)
+
+        # === Loss 1: Node-level JEPA — predict from context neighbors ===
+        c2m = masked_flag[ei[1]] & ~masked_flag[ei[0]]  # context→masked edges
+        if c2m.any():
+            nbr_sum = torch.zeros(N, self.hid, device=dev)
+            nbr_cnt = torch.zeros(N, 1, device=dev)
+            nbr_sum.index_add_(0, ei[1, c2m], c[ei[0, c2m]])
+            nbr_cnt.index_add_(0, ei[1, c2m], torch.ones(c2m.sum(), 1, device=dev))
+            nbr_mean = nbr_sum / nbr_cnt.clamp(min=1)
+            pred = F.layer_norm(self.pred(nbr_mean[mi]), [self.hid])
+            pred_loss = F.smooth_l1_loss(pred, target)
+        else:
+            pred_loss = torch.tensor(0.0, device=dev, requires_grad=True)
+
+        # === Loss 2: Graph-level BYOL ===
+        stu_graph = global_mean_pool(c, batch.batch)
+        stu_pred = self.graph_pred(stu_graph)
+        byol_loss = 2 - 2 * F.cosine_similarity(stu_pred, tgt_graph, dim=-1).mean()
+
+        # === Loss 3: VICReg on context nodes ===
+        ctx_emb = c[~masked_flag]; Nc = ctx_emb.size(0)
+        std = torch.sqrt(ctx_emb.var(dim=0)+1e-4)
+        vl = F.relu(1.0-std).mean()
+        cm = ctx_emb-ctx_emb.mean(0); cov = (cm.T@cm)/max(Nc-1,1)
+        od = cov.flatten()[1:].view(self.hid-1,self.hid+1)[:,:-1].flatten()
+        cl = (od**2).sum()/self.hid
+
+        total = pred_loss + 1.0*byol_loss + 25*vl + 1*cl
+        return total, {"pred":pred_loss.item(), "byol":byol_loss.item(), "std":std.mean().item()}
+
     def encode_graph(self, batch):
         return global_mean_pool(self.enc(batch.x, batch.edge_index), batch.batch)
 
@@ -177,12 +238,15 @@ def main():
     parser.add_argument("--dataset", required=True, choices=["cifar10", "stl10", "tinyimagenet"])
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--hid", type=int, default=256)
+    parser.add_argument("--hid", type=int, default=384)
+    parser.add_argument("--n_layers", type=int, default=4)
+    parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--bs", type=int, default=32)
     parser.add_argument("--n_train", type=int, default=None)
     parser.add_argument("--n_test", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--unlabeled", action="store_true", help="Use STL-10 100K unlabeled split for pretraining")
     args = parser.parse_args()
 
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -191,34 +255,29 @@ def main():
     print(f"Device: {device}", flush=True)
     print(f"Dataset: {args.dataset}", flush=True)
 
-    # Check for cached final graphs (sharded .pt format for fast loading)
-    ck = hashlib.md5(f"{args.dataset}_{args.n_train}_{args.n_test}_dino398".encode()).hexdigest()[:12]
+    # Use --unlabeled flag to pretrain on STL-10's 100K unlabeled split
+    use_unlabeled = args.unlabeled and (args.dataset == "stl10")
+
+    # Cache key includes 'unlabeled' flag so cached graphs are separate
+    cache_tag = f"{args.dataset}_{args.n_train}_{args.n_test}_dino398" + ("_unlabeled" if use_unlabeled else "")
+    ck = hashlib.md5(cache_tag.encode()).hexdigest()[:12]
     cache_dir_shard = os.path.join(CACHE_DIR, f"graphs398_{ck}")
-    # Also check legacy single-pickle format
-    cache_path_legacy = os.path.join(CACHE_DIR, f"graphs398_{ck}.pkl")
 
     if os.path.isdir(cache_dir_shard) and os.path.exists(os.path.join(cache_dir_shard, "meta.pt")):
         print(f"Loading cached sharded graphs: {cache_dir_shard}", flush=True)
         meta = torch.load(os.path.join(cache_dir_shard, "meta.pt"), weights_only=False)
-        train_graphs = [torch.load(os.path.join(cache_dir_shard, f"train_{i}.pt"), weights_only=False) for i in range(meta["n_train"])]
-        test_graphs = [torch.load(os.path.join(cache_dir_shard, f"test_{i}.pt"), weights_only=False) for i in range(meta["n_test"])]
-        train_labels, test_labels = meta["train_y"], meta["test_y"]
-        print(f"  Loaded {len(train_graphs)} train, {len(test_graphs)} test", flush=True)
-    elif os.path.exists(cache_path_legacy):
-        print(f"Loading legacy pickle cache: {cache_path_legacy}", flush=True)
-        with open(cache_path_legacy, "rb") as f:
-            cached = pickle.load(f)
-        train_graphs, test_graphs, train_labels, test_labels = cached["train"], cached["test"], cached["train_y"], cached["test_y"]
-        # Convert to sharded format for next time
-        print(f"  Converting to sharded format...", flush=True)
-        os.makedirs(cache_dir_shard, exist_ok=True)
-        for i, g in enumerate(train_graphs): torch.save(g, os.path.join(cache_dir_shard, f"train_{i}.pt"))
-        for i, g in enumerate(test_graphs): torch.save(g, os.path.join(cache_dir_shard, f"test_{i}.pt"))
-        torch.save({"n_train": len(train_graphs), "n_test": len(test_graphs),
-                     "train_y": train_labels, "test_y": test_labels},
-                    os.path.join(cache_dir_shard, "meta.pt"))
-        os.remove(cache_path_legacy)
-        print(f"  Sharded cache saved, legacy pickle deleted", flush=True)
+        if use_unlabeled:
+            pretrain_graphs = [torch.load(os.path.join(cache_dir_shard, f"pretrain_{i}.pt"), weights_only=False) for i in range(meta["n_pretrain"])]
+            train_graphs = [torch.load(os.path.join(cache_dir_shard, f"train_{i}.pt"), weights_only=False) for i in range(meta["n_train"])]
+            test_graphs = [torch.load(os.path.join(cache_dir_shard, f"test_{i}.pt"), weights_only=False) for i in range(meta["n_test"])]
+            train_labels, test_labels = meta["train_y"], meta["test_y"]
+            print(f"  Loaded {len(pretrain_graphs)} pretrain, {len(train_graphs)} train, {len(test_graphs)} test", flush=True)
+        else:
+            train_graphs = [torch.load(os.path.join(cache_dir_shard, f"train_{i}.pt"), weights_only=False) for i in range(meta["n_train"])]
+            test_graphs = [torch.load(os.path.join(cache_dir_shard, f"test_{i}.pt"), weights_only=False) for i in range(meta["n_test"])]
+            train_labels, test_labels = meta["train_y"], meta["test_y"]
+            pretrain_graphs = train_graphs
+            print(f"  Loaded {len(train_graphs)} train, {len(test_graphs)} test", flush=True)
     else:
         # Step 1: Load images
         print("Step 1: Loading images...", flush=True)
@@ -252,7 +311,6 @@ def main():
 
         n_tr = min(args.n_train or len(tr_ds), len(tr_ds))
         n_te = min(args.n_test or len(te_ds), len(te_ds))
-        print(f"  Train: {n_tr}, Test: {n_te}", flush=True)
 
         # Load all images as numpy arrays
         t0 = time.time()
@@ -260,6 +318,16 @@ def main():
         tr_labels = [tr_ds[i][1] for i in range(n_tr)]
         te_imgs = [np.array(te_ds[i][0]) for i in range(n_te)]
         te_labels = [te_ds[i][1] for i in range(n_te)]
+
+        # For STL-10: load 100K unlabeled split for pretraining (standard SSL protocol)
+        if use_unlabeled:
+            un_ds = datasets.STL10(data_dir, split='unlabeled', download=True)
+            n_un = len(un_ds)
+            un_imgs = [np.array(un_ds[i][0]) for i in range(n_un)]
+            un_labels = [-1] * n_un  # no labels
+            print(f"  Pretrain (unlabeled): {n_un}, Train (labeled): {n_tr}, Test: {n_te}", flush=True)
+        else:
+            print(f"  Train: {n_tr}, Test: {n_te}", flush=True)
         print(f"  Images loaded in {time.time()-t0:.1f}s", flush=True)
 
         # Step 2: DINO patch extraction (batched GPU)
@@ -288,6 +356,9 @@ def main():
                     print(f"    DINO: {min(i+BS, len(images))}/{len(images)}", flush=True)
             return all_patches
 
+        if use_unlabeled:
+            un_patches = extract_dino_patches(un_imgs)
+            print(f"  DINO unlabeled done: {un_patches.shape}", flush=True)
         tr_patches = extract_dino_patches(tr_imgs)
         te_patches = extract_dino_patches(te_imgs)
         del dino; torch.cuda.empty_cache()
@@ -298,11 +369,11 @@ def main():
         t0 = time.time()
 
         def build_split(images, patches, labels_list):
-            graphs, labels = [], []
+            graphs = []
             def proc(i):
                 g = build_graph_with_dino(images[i], kernel, patches[i])
                 return i, g
-            with ThreadPoolExecutor(max_workers=8) as ex:
+            with ThreadPoolExecutor(max_workers=16) as ex:
                 futures = {ex.submit(proc, i): i for i in range(len(images))}
                 done = 0
                 for f in as_completed(futures):
@@ -316,70 +387,61 @@ def main():
             graphs.sort(key=lambda x: x[0])
             return [g for _, g in graphs]
 
+        if use_unlabeled:
+            pretrain_graphs = build_split(un_imgs, un_patches, un_labels)
+            del un_imgs, un_patches
+            print(f"  Pretrain graphs: {len(pretrain_graphs)}", flush=True)
         train_graphs = build_split(tr_imgs, tr_patches, tr_labels)
         test_graphs = build_split(te_imgs, te_patches, te_labels)
         train_labels = [g.y.item() for g in train_graphs]
         test_labels = [g.y.item() for g in test_graphs]
+        if not use_unlabeled:
+            pretrain_graphs = train_graphs
         del tr_imgs, te_imgs, tr_patches, te_patches
-        print(f"  Graphs built in {time.time()-t0:.1f}s: {len(train_graphs)} train, {len(test_graphs)} test", flush=True)
-        print(f"  Feature dim: {train_graphs[0].x.shape[1]}, Nodes avg: {np.mean([g.num_nodes for g in train_graphs]):.0f}", flush=True)
+        print(f"  Graphs built in {time.time()-t0:.1f}s: {len(pretrain_graphs)} pretrain, {len(train_graphs)} train, {len(test_graphs)} test", flush=True)
+        print(f"  Feature dim: {train_graphs[0].x.shape[1]}, Nodes avg: {np.mean([g.num_nodes for g in pretrain_graphs]):.0f}", flush=True)
 
         # Cache (sharded .pt format — fast to load)
         os.makedirs(cache_dir_shard, exist_ok=True)
+        if use_unlabeled:
+            for i, g in enumerate(pretrain_graphs): torch.save(g, os.path.join(cache_dir_shard, f"pretrain_{i}.pt"))
         for i, g in enumerate(train_graphs): torch.save(g, os.path.join(cache_dir_shard, f"train_{i}.pt"))
         for i, g in enumerate(test_graphs): torch.save(g, os.path.join(cache_dir_shard, f"test_{i}.pt"))
-        torch.save({"n_train": len(train_graphs), "n_test": len(test_graphs),
-                     "train_y": train_labels, "test_y": test_labels},
-                    os.path.join(cache_dir_shard, "meta.pt"))
+        meta = {"n_train": len(train_graphs), "n_test": len(test_graphs),
+                "train_y": train_labels, "test_y": test_labels}
+        if use_unlabeled:
+            meta["n_pretrain"] = len(pretrain_graphs)
+        torch.save(meta, os.path.join(cache_dir_shard, "meta.pt"))
         cache_size = sum(os.path.getsize(os.path.join(cache_dir_shard, f)) for f in os.listdir(cache_dir_shard))
-        print(f"  Cached: {cache_dir_shard} ({cache_size/1e6:.0f} MB, {len(train_graphs)+len(test_graphs)} files)", flush=True)
+        print(f"  Cached: {cache_dir_shard} ({cache_size/1e6:.0f} MB)", flush=True)
 
-    # Step 4: Train IG-JEPA
-    print(f"\nStep 4: IG-JEPA training ({args.epochs} epochs)...", flush=True)
-    in_dim = train_graphs[0].x.shape[1]
-    train_loader = DataLoader(train_graphs, batch_size=args.bs, shuffle=True, num_workers=0)
+    # Step 4: Train IG-JEPA on pretrain split (unlabeled for STL-10, train for others)
+    print(f"\nStep 4: IG-JEPA pretraining on {len(pretrain_graphs)} graphs ({args.epochs} epochs)...", flush=True)
+    in_dim = pretrain_graphs[0].x.shape[1]
+    pretrain_loader = DataLoader(pretrain_graphs, batch_size=args.bs, shuffle=True, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_graphs, batch_size=args.bs, num_workers=0)
     test_loader = DataLoader(test_graphs, batch_size=args.bs, num_workers=0)
 
-    model = IGJEPA(in_dim, args.hid).to(device)
+    model = IGJEPA(in_dim, args.hid, n_layers=args.n_layers, n_heads=args.n_heads).to(device)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=0.01)
     sch = CosineAnnealingLR(opt, T_max=args.epochs, eta_min=1e-6)
-    scaler = torch.amp.GradScaler('cuda')
-
-    best_loss = float('inf')
-    patience_counter = 0
-    patience = 15
-    ckpt_path = os.path.join(CACHE_DIR, f"best_model_{args.dataset}.pt")
 
     for ep in range(1, args.epochs+1):
         model.train(); tl, n = 0, 0
-        for b in train_loader:
+        for b in pretrain_loader:
             b = b.to(device); opt.zero_grad()
-            with torch.amp.autocast('cuda'):
-                loss, info = model(b)
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(opt); scaler.update(); model.ema_update()
+            loss, info = model(b)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); model.ema_update()
             tl += loss.item(); n += 1
         sch.step()
         avg_loss = tl / n
-        if avg_loss < best_loss - 0.001:
-            best_loss = avg_loss
-            patience_counter = 0
-            torch.save({"epoch": ep, "model": model.state_dict(), "loss": avg_loss},
-                       ckpt_path)
-        else:
-            patience_counter += 1
         if ep % 10 == 0 or ep == 1:
-            print(f"  Ep {ep:3d} | Loss: {avg_loss:.4f} | std: {info['std']:.4f} | pat: {patience_counter}/{patience}", flush=True)
-        if patience_counter >= patience:
-            print(f"  Early stop at epoch {ep} (no improvement for {patience} epochs)", flush=True)
-            break
+            byol_str = f" | byol: {info.get('byol',0):.4f}" if 'byol' in info else ""
+            print(f"  Ep {ep:3d} | Loss: {avg_loss:.4f} | std: {info['std']:.4f}{byol_str}", flush=True)
 
-    # Load best model if checkpoint exists
-    if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, weights_only=False)
-        model.load_state_dict(ckpt["model"])
-        print(f"  Loaded best model from epoch {ckpt['epoch']} (loss={ckpt['loss']:.4f})", flush=True)
+    print(f"  Training complete. Using final model from epoch {args.epochs}.", flush=True)
 
     # Step 5: Evaluate
     print("\nStep 5: Evaluation...", flush=True)
@@ -401,20 +463,30 @@ def main():
     Xj_tr, y_tr = extract(train_loader); Xj_te, y_te = extract(test_loader)
     Xr_tr, _ = extract_raw(train_loader); Xr_te, _ = extract_raw(test_loader)
 
+    from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, classification_report
     clf_j = LogisticRegression(max_iter=2000); clf_j.fit(Xj_tr, y_tr)
     clf_r = LogisticRegression(max_iter=2000); clf_r.fit(Xr_tr, y_tr)
-    acc_j = accuracy_score(y_te, clf_j.predict(Xj_te))
-    acc_r = accuracy_score(y_te, clf_r.predict(Xr_te))
+    pred_j, pred_r = clf_j.predict(Xj_te), clf_r.predict(Xr_te)
+    acc_j = accuracy_score(y_te, pred_j)
+    acc_r = accuracy_score(y_te, pred_r)
 
-    # MLP probe
+    # MLP probe (proper training with scheduler)
     n_cls = len(np.unique(y_tr))
-    mlp = nn.Sequential(nn.Linear(args.hid, args.hid), nn.GELU(), nn.Dropout(0.1), nn.Linear(args.hid, n_cls)).to(device)
-    mlp_opt = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+    mlp = nn.Sequential(nn.Linear(args.hid, args.hid), nn.GELU(), nn.Dropout(0.1),
+                         nn.Linear(args.hid, args.hid), nn.GELU(), nn.Dropout(0.1),
+                         nn.Linear(args.hid, n_cls)).to(device)
+    mlp_opt = torch.optim.AdamW(mlp.parameters(), lr=1e-3, weight_decay=1e-4)
+    mlp_sch = CosineAnnealingLR(mlp_opt, T_max=200, eta_min=1e-5)
     Xt = torch.tensor(Xj_tr, dtype=torch.float).to(device)
     yt = torch.tensor(y_tr, dtype=torch.long).to(device)
+    mlp_bs = 256
     mlp.train()
-    for _ in range(100):
-        mlp_opt.zero_grad(); F.cross_entropy(mlp(Xt), yt).backward(); mlp_opt.step()
+    for ep_mlp in range(200):
+        perm = torch.randperm(Xt.size(0), device=device)
+        for i in range(0, Xt.size(0), mlp_bs):
+            idx = perm[i:i+mlp_bs]
+            mlp_opt.zero_grad(); F.cross_entropy(mlp(Xt[idx]), yt[idx]).backward(); mlp_opt.step()
+        mlp_sch.step()
     mlp.eval()
     with torch.no_grad(): acc_mlp = accuracy_score(y_te, mlp(torch.tensor(Xj_te, dtype=torch.float).to(device)).argmax(1).cpu().numpy())
 
@@ -423,11 +495,62 @@ def main():
     print(f"  JEPA + LogReg:           {acc_j*100:.2f}%", flush=True)
     print(f"  JEPA + MLP:              {acc_mlp*100:.2f}%", flush=True)
 
+    # Detailed metrics
+    avg = 'weighted' if len(np.unique(y_te)) > 2 else 'binary'
+    f1_j = f1_score(y_te, pred_j, average=avg)
+    f1_r = f1_score(y_te, pred_r, average=avg)
+    prec_j = precision_score(y_te, pred_j, average=avg)
+    prec_r = precision_score(y_te, pred_r, average=avg)
+    rec_j = recall_score(y_te, pred_j, average=avg)
+    rec_r = recall_score(y_te, pred_r, average=avg)
+    print(f"\nDETAILED METRICS — {args.dataset}", flush=True)
+    print(f"  {'Metric':>12} | {'Raw+LR':>8} | {'JEPA+LR':>8}", flush=True)
+    print(f"  {'Accuracy':>12} | {acc_r*100:>7.2f}% | {acc_j*100:>7.2f}%", flush=True)
+    print(f"  {'F1 (wtd)':>12} | {f1_r*100:>7.2f}% | {f1_j*100:>7.2f}%", flush=True)
+    print(f"  {'Precision':>12} | {prec_r*100:>7.2f}% | {prec_j*100:>7.2f}%", flush=True)
+    print(f"  {'Recall':>12} | {rec_r*100:>7.2f}% | {rec_j*100:>7.2f}%", flush=True)
+
+    # Per-class report
+    print(f"\nPER-CLASS REPORT (JEPA + LogReg) — {args.dataset}", flush=True)
+    print(classification_report(y_te, pred_j, digits=4), flush=True)
+
+    # Confusion matrix
+    cm = confusion_matrix(y_te, pred_j)
+    print(f"CONFUSION MATRIX (JEPA + LogReg) — {args.dataset}", flush=True)
+    print(cm, flush=True)
+
+    # Label efficiency evaluation
+    print(f"\nLABEL EFFICIENCY — {args.dataset}", flush=True)
+    print(f"  {'Frac':>6} | {'N_train':>7} | {'Raw+LR':>8} | {'JEPA+LR':>8} | {'Gap':>7}", flush=True)
+    print(f"  {'-'*6} | {'-'*7} | {'-'*8} | {'-'*8} | {'-'*7}", flush=True)
+    label_fracs = [0.01, 0.02, 0.05, 0.10, 0.20, 0.50, 1.00]
+    label_eff = {}
+    from sklearn.model_selection import StratifiedShuffleSplit
+    for frac in label_fracs:
+        n_sub = max(10, int(len(y_tr) * frac))
+        if n_sub >= len(y_tr):
+            sub_idx = np.arange(len(y_tr))
+        else:
+            sss = StratifiedShuffleSplit(n_splits=1, train_size=n_sub, random_state=42)
+            sub_idx = list(sss.split(Xj_tr, y_tr))[0][0]
+        clf_j_sub = LogisticRegression(max_iter=2000); clf_j_sub.fit(Xj_tr[sub_idx], y_tr[sub_idx])
+        clf_r_sub = LogisticRegression(max_iter=2000); clf_r_sub.fit(Xr_tr[sub_idx], y_tr[sub_idx])
+        acc_j_sub = accuracy_score(y_te, clf_j_sub.predict(Xj_te))
+        acc_r_sub = accuracy_score(y_te, clf_r_sub.predict(Xr_te))
+        gap = acc_j_sub - acc_r_sub
+        label_eff[frac] = {"raw": acc_r_sub, "jepa": acc_j_sub, "n": n_sub}
+        print(f"  {frac:>5.0%} | {n_sub:>7} | {acc_r_sub*100:>7.2f}% | {acc_j_sub*100:>7.2f}% | {gap*100:>+6.2f}%", flush=True)
+
     # Signal
     import json
     sig = {"acc_raw": acc_r, "acc_jepa_lr": acc_j, "acc_jepa_mlp": acc_mlp,
+           "f1_raw": f1_r, "f1_jepa": f1_j,
+           "precision_raw": prec_r, "precision_jepa": prec_j,
+           "recall_raw": rec_r, "recall_jepa": rec_j,
+           "confusion_matrix": cm.tolist(),
+           "label_efficiency": label_eff,
            "dataset": args.dataset, "params": sum(p.numel() for p in model.parameters())}
-    with open(f"/home/ud3d4/Desktop/NIPS 26/signals/done_{args.dataset}_dino.json", "w") as f:
+    with open(f"/home/ud3d4/Desktop/Projects/NIPS 26/signals/done_{args.dataset}_dino.json", "w") as f:
         json.dump(sig, f, indent=2)
     print(f"Signal: done_{args.dataset}_dino.json", flush=True)
 

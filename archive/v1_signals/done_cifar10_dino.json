@@ -1,0 +1,7 @@
+{
+  "acc_raw": 0.0985,
+  "acc_jepa_lr": 0.6501,
+  "acc_jepa_mlp": 0.6124,
+  "dataset": "cifar10",
+  "params": 2511104
+}

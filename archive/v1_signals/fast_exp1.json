@@ -1,0 +1,7 @@
+{
+  "exp": 1,
+  "name": "DINO+Transformer+VICReg (baseline)",
+  "acc": 0.6877,
+  "params": 2511104,
+  "epochs": 50
+}

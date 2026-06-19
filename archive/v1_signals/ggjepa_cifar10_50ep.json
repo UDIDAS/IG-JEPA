@@ -1,0 +1,11 @@
+{
+  "dataset": "cifar10",
+  "epochs": 50,
+  "results": {
+    "graph": 0.5524
+  },
+  "sota": {
+    "method": "MoCo v2",
+    "acc": 92.9
+  }
+}

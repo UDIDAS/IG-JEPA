@@ -323,8 +323,104 @@ fn merge_and_cut<'py>(
     ))
 }
 
+/// BFS-based subgraph masking for JEPA training.
+///
+/// Given edge_index (2, E) and num_nodes N, grows a connected subgraph from a
+/// random seed until mask_count nodes are selected. Returns:
+///   - masked_indices: (mask_count,) i64 — the masked node indices
+///   - ctx_src, ctx_dst: (E',) i64 each — edges NOT touching any masked node
+#[pyfunction]
+fn subgraph_mask<'py>(
+    py: Python<'py>,
+    src_arr: PyReadonlyArrayDyn<'_, i64>,
+    dst_arr: PyReadonlyArrayDyn<'_, i64>,
+    num_nodes: usize,
+    mask_count: usize,
+    seed: usize,
+) -> PyResult<(
+    Bound<'py, numpy::PyArray1<i64>>,
+    Bound<'py, numpy::PyArray1<i64>>,
+    Bound<'py, numpy::PyArray1<i64>>,
+)> {
+    let src = src_arr.as_array();
+    let dst = dst_arr.as_array();
+    let e = src.len();
+
+    let (masked_vec, ctx_s, ctx_d) = py.allow_threads(move || {
+        // Build adjacency list
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_nodes];
+        for i in 0..e {
+            let s = src[i] as usize;
+            let d = dst[i] as usize;
+            adj[s].push(d);
+        }
+
+        // BFS from seed
+        let mut is_masked = vec![false; num_nodes];
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        let start = seed % num_nodes;
+        queue.push_back(start);
+        is_masked[start] = true;
+        let mut count = 1usize;
+
+        while count < mask_count {
+            let node = match queue.pop_front() {
+                Some(n) => n,
+                None => break,
+            };
+            for &nbr in &adj[node] {
+                if !is_masked[nbr] {
+                    is_masked[nbr] = true;
+                    count += 1;
+                    queue.push_back(nbr);
+                    if count >= mask_count { break; }
+                }
+            }
+        }
+
+        // If disconnected, fill randomly (deterministic sweep from seed)
+        if count < mask_count {
+            let mut idx = (start + 1) % num_nodes;
+            while count < mask_count {
+                if !is_masked[idx] {
+                    is_masked[idx] = true;
+                    count += 1;
+                }
+                idx = (idx + 1) % num_nodes;
+            }
+        }
+
+        // Collect masked indices
+        let mut masked_vec: Vec<i64> = Vec::with_capacity(mask_count);
+        for i in 0..num_nodes {
+            if is_masked[i] { masked_vec.push(i as i64); }
+        }
+
+        // Filter edges: keep only edges where neither endpoint is masked
+        let mut ctx_s: Vec<i64> = Vec::with_capacity(e);
+        let mut ctx_d: Vec<i64> = Vec::with_capacity(e);
+        for i in 0..e {
+            let s = src[i] as usize;
+            let d = dst[i] as usize;
+            if !is_masked[s] && !is_masked[d] {
+                ctx_s.push(s as i64);
+                ctx_d.push(d as i64);
+            }
+        }
+
+        (masked_vec, ctx_s, ctx_d)
+    });
+
+    Ok((
+        numpy::PyArray1::from_vec_bound(py, masked_vec),
+        numpy::PyArray1::from_vec_bound(py, ctx_s),
+        numpy::PyArray1::from_vec_bound(py, ctx_d),
+    ))
+}
+
 #[pymodule]
 fn fastloops(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(merge_and_cut, m)?)?;
+    m.add_function(wrap_pyfunction!(subgraph_mask, m)?)?;
     Ok(())
 }

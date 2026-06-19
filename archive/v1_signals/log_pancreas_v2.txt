@@ -1,0 +1,39 @@
+Device: cuda:1
+Dataset: pancreas
+Config: hid=256, layers=6, pretrain=50, classify=50
+
+Step 1: Loading volumes...
+  Train slices: 2000, Test slices: 500
+
+Step 2: Building fine supergraphs...
+    500/2000
+    1000/2000
+    1500/2000
+    2000/2000
+    500/500
+  Built in 94.4s: 2000 train, 500 test
+  Nodes avg: 433, Feature dim: 20
+
+Step 3: IG-JEPA Pretraining (50 epochs)...
+  Ep   1 | Loss: 2.8583 | std: 1.0264
+  Ep  20 | Loss: 0.5196 | std: 1.0433
+  Ep  40 | Loss: 0.4768 | std: 1.0283
+
+Step 4: MLP Node Classifier (50 epochs)...
+  Ep   1 | Loss: 1.6971
+  Ep  20 | Loss: 1.2701
+  Ep  40 | Loss: 1.2047
+
+Step 5: Evaluation + post-processing...
+
+============================================================
+RESULTS — pancreas
+============================================================
+  Pancreas     Dice (raw): 24.16%  Dice (post-proc): 5.09%  (n=473)
+  Tumor        Dice (raw): 8.45%  Dice (post-proc): 8.45%  (n=126)
+
+Signal: /home/ud3d4/Desktop/NIPS 26/signals/done_pancreas_medical_v2.json
+
+SOTA targets:
+  Pancreas: 94.0% (3D nnU-Net, 2025)
+

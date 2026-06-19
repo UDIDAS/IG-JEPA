@@ -1,3 +1,23 @@
-signals
-reports
-data
+# Build artifacts
+fastloops/target/
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+
+# Cache
+*.pkl
+/scratch/
+
+# IDE / system
+.claude/
+.nfs*
+*.swp
+
+# Large files
+*.pt
+*.bin
+
+# Archive reports (binary-heavy)
+archive/v1_reports/
+archive/v1_data/

@@ -1,0 +1,11 @@
+{
+  "dataset": "pancreas",
+  "task": "tumor_burden_classification",
+  "acc_jepa": 0.9122807017543859,
+  "f1_jepa": 0.9082894450210791,
+  "acc_raw": 0.8947368421052632,
+  "volume_mae": 285.034912109375,
+  "volume_rel_mae": 0.15229364069046042,
+  "n_train": 224,
+  "n_test": 57
+}

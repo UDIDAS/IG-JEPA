@@ -1,0 +1,9 @@
+{
+  "dataset": "lits",
+  "n_train": 2000,
+  "n_test": 500,
+  "dice_liver_raw": 0.37041416101324415,
+  "dice_liver_pp": 0.027694166256971544,
+  "dice_tumor_raw": 0.043057195528861524,
+  "dice_tumor_pp": 0.043057195528861524
+}

@@ -1,0 +1,8 @@
+{
+  "tokens": 544.514,
+  "memory_gb": 0.347011072,
+  "gflops": 0.0,
+  "img_per_sec": 71.79120591001801,
+  "params": 1156864,
+  "dataset": "tinyimagenet"
+}

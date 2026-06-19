@@ -1,0 +1,54 @@
+Device: cuda:1
+
+============================================================
+KG-JEPA — lits
+============================================================
+  Loaded /home/ud3d4/Desktop/Projects/MICCAI_26/kg/kgLiTSv2.ttl: 15252 triples
+  Graph: 871 nodes, 23083 edges, 523-dim features
+  Labels: [288 287 296]
+
+Phase 1: KG-JEPA Pretraining (200 epochs)...
+  Ep   1 | Loss: 7.7797 | std: 0.8159
+  Ep  50 | Loss: 0.0498 | std: 1.8220
+  Ep 100 | Loss: 0.0490 | std: 1.9553
+  Ep 150 | Loss: 0.0467 | std: 1.9817
+  Ep 200 | Loss: 0.0536 | std: 1.9919
+
+Phase 2: Evaluation...
+
+  RESULTS — lits
+  Task: Tumor Burden Classification (3-class)
+    KG-JEPA + LogReg:    Acc=96.00%  F1=0.9609
+    Raw features + LogReg: Acc=99.43%
+    Delta: -3.43%
+  Task: Tumor Volume Prediction
+    MAE: 246 voxels  (relative: 0.04)
+    Mean test volume: 5490
+  Signal: /home/ud3d4/Desktop/NIPS 26/signals/done_lits_kg_jepa.json
+
+============================================================
+KG-JEPA — pancreas
+============================================================
+  Loaded /home/ud3d4/Desktop/Projects/MICCAI_26/kg/kg_niiv2.ttl: 21917 triples
+  Graph: 281 nodes, 1405 edges, 523-dim features
+  Labels: [93 90 98]
+
+Phase 1: KG-JEPA Pretraining (200 epochs)...
+  Ep   1 | Loss: 3.2768 | std: 1.1328
+  Ep  50 | Loss: 0.0673 | std: 1.6628
+  Ep 100 | Loss: 0.0083 | std: 2.1158
+  Ep 150 | Loss: 0.0057 | std: 2.1170
+  Ep 200 | Loss: 0.0040 | std: 2.1921
+
+Phase 2: Evaluation...
+
+  RESULTS — pancreas
+  Task: Tumor Burden Classification (3-class)
+    KG-JEPA + LogReg:    Acc=84.21%  F1=0.8325
+    Raw features + LogReg: Acc=94.74%
+    Delta: -10.53%
+  Task: Tumor Volume Prediction
+    MAE: 1176 voxels  (relative: 0.37)
+    Mean test volume: 3160
+  Signal: /home/ud3d4/Desktop/NIPS 26/signals/done_pancreas_kg_jepa.json
+

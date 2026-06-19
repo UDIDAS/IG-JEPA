@@ -1,0 +1,9 @@
+{
+  "dataset": "pancreas",
+  "n_train": 2000,
+  "n_test": 500,
+  "dice_pancreas_raw": 0.24161295119459442,
+  "dice_pancreas_pp": 0.05088792005620585,
+  "dice_tumor_raw": 0.08447773171860085,
+  "dice_tumor_pp": 0.08447773171860085
+}

@@ -1,0 +1,61 @@
+{
+  "acc_raw": 0.5787,
+  "acc_jepa_lr": 0.5885,
+  "acc_jepa_mlp": 0.5382,
+  "f1_raw": 0.5756095776002903,
+  "f1_jepa": 0.5858195424574999,
+  "precision_raw": 0.5769447409700676,
+  "precision_jepa": 0.5884257206566094,
+  "recall_raw": 0.5787,
+  "recall_jepa": 0.5885,
+  "label_efficiency": {
+    "0.01": {
+      "raw": 0.2521,
+      "jepa": 0.2595,
+      "n": 1000
+    },
+    "0.02": {
+      "raw": 0.3304,
+      "jepa": 0.3364,
+      "n": 2000
+    },
+    "0.05": {
+      "raw": 0.4095,
+      "jepa": 0.4177,
+      "n": 5000
+    },
+    "0.1": {
+      "raw": 0.4521,
+      "jepa": 0.4629,
+      "n": 10000
+    },
+    "0.2": {
+      "raw": 0.4742,
+      "jepa": 0.4967,
+      "n": 20000
+    },
+    "0.5": {
+      "raw": 0.5153,
+      "jepa": 0.5561,
+      "n": 50000
+    },
+    "1.0": {
+      "raw": 0.5787,
+      "jepa": 0.5885,
+      "n": 100000
+    }
+  },
+  "dataset": "tinyimagenet",
+  "params": 5782656,
+  "confusion_matrix_summary": {
+    "shape": [
+      200,
+      200
+    ],
+    "overall_accuracy": 0.5885,
+    "per_class_acc_mean": 0.5885,
+    "per_class_acc_std": 0.14766770127553283,
+    "per_class_acc_min": 0.12,
+    "per_class_acc_max": 0.92
+  }
+}

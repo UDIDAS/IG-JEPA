@@ -1,0 +1,8 @@
+{
+  "tokens": 578.054,
+  "memory_gb": 0.480321024,
+  "gflops": 0.0,
+  "img_per_sec": 74.9661702588183,
+  "params": 1156864,
+  "dataset": "cifar10"
+}

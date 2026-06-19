@@ -1,0 +1,7 @@
+{
+  "acc_raw": 0.023,
+  "acc_jepa_lr": 0.256,
+  "acc_jepa_mlp": 0.2355,
+  "dataset": "tinyimagenet",
+  "params": 2511104
+}

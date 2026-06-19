@@ -1,0 +1,29 @@
+{
+  "table1": {
+    "1.0": 0.183,
+    "mlp": 0.165
+  },
+  "table2": {
+    "0.01": 0.0755,
+    "0.05": 0.1155,
+    "0.1": 0.1345,
+    "1.0": 0.1835,
+    "mlp": 0.1635
+  },
+  "table3": {
+    "Random Node Masking": 0.1815,
+    "Region Masking": 0.1845,
+    "Topology-aware Masking": 0.187,
+    "S=1 (no hierarchy)": 0.1905,
+    "S=2 (with hierarchy)": 0.1885,
+    "GIN encoder": 0.1335,
+    "Graph Transformer": 0.1965
+  },
+  "table4": {
+    "tokens_per_graph": 544.46875,
+    "memory_gb": 0.322322944,
+    "gflops": 2.520341488,
+    "img_per_sec": 6114.16248404469,
+    "params": 2314496
+  }
+}

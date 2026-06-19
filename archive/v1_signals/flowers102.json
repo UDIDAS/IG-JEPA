@@ -1,0 +1,7 @@
+{
+  "acc_raw": 0.8461538461538461,
+  "acc_jepa": 0.7752480078061473,
+  "dataset": "flowers102",
+  "n_classes": 102,
+  "resolution": "224x224"
+}
