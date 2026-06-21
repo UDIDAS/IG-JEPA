@@ -52,8 +52,26 @@ def region_labels(adj):
     return lab.astype(np.int32).reshape(H,W)
 
 
-def build_graph_with_dino(img_np, kernel, dino_grid):
-    """Build one graph with 14-dim boundary + 384-dim DINO = 398-dim per node."""
+N_FEAT = 72  # Total feature dims per node (all from raw pixels, NO pretrained models)
+
+def build_graph(img_np, kernel):
+    """Build one graph with pixel-derived features only. No pretrained models.
+    Features per node (72-dim):
+      [0:6]   RGB mean/std (6)
+      [6:12]  HSV mean/std (6)
+      [12:14] grayscale mean/std (2)
+      [14]    log(area)
+      [15:17] centroid x,y normalized (2)
+      [17:19] bbox width, height normalized (2)
+      [19]    boundary_len / area
+      [20]    compactness (area / bbox_area)
+      [21]    relative area (area / image_area)
+      [22:28] RGB skewness + kurtosis (6)
+      [28:44] color histogram (16 bins on grayscale)
+      [44:52] gradient magnitude mean/std + direction histogram (8)
+      [52:68] multi-scale means: 4x4 grid position features (16)
+      [68:72] shape: 2nd order moments (4)
+    """
     if img_np.ndim == 2: img_np = np.stack([img_np]*3, axis=-1)
     H, W = img_np.shape[:2]
     adj, feat = fastloops.merge_and_cut(img_np, **kernel)
@@ -81,41 +99,122 @@ def build_graph_with_dino(img_np, kernel, dino_grid):
     ap = np.sort(np.concatenate(ps), axis=1); u = np.unique(ap, axis=0)
     s = np.concatenate([u[:,0], u[:,1]]); d = np.concatenate([u[:,1], u[:,0]])
 
-    # Boundary features (14-dim)
+    # === All features from raw pixels ===
     img_f = img_np.astype(np.float64) / 255.0
     ff = feat.astype(np.float64); area = ff[:,0].clip(min=1)
     flat_map = snode_map.ravel(); valid = flat_map >= 0
     counts = np.bincount(flat_map[valid], minlength=N).astype(np.float64).clip(min=1)
 
-    nf = np.zeros((N, 398), dtype=np.float32)
+    nf = np.zeros((N, N_FEAT), dtype=np.float32)
+    d_idx = 0
+
+    # [0:6] RGB mean/std
     for ch in range(3):
         flat_ch = img_f[:,:,ch].ravel()[valid]
         sums = np.bincount(flat_map[valid], weights=flat_ch, minlength=N)
         means = sums / counts
         sq_sums = np.bincount(flat_map[valid], weights=flat_ch**2, minlength=N)
         stds = np.sqrt((sq_sums / counts - means**2).clip(min=0))
-        nf[:, ch*2] = means; nf[:, ch*2+1] = stds
+        nf[:, d_idx] = means; nf[:, d_idx+1] = stds; d_idx += 2
 
-    nf[:, 6] = np.log1p(area)
-    nf[:, 7] = ff[:,1] / area / W  # centroid_x
-    nf[:, 8] = ff[:,2] / area / H  # centroid_y
-    nf[:, 9] = (ff[:,10]-ff[:,9]) / W
-    nf[:, 10] = (ff[:,12]-ff[:,11]) / H
-    nf[:, 11] = ff[:,13] / area
+    # [6:12] HSV mean/std
+    from colorsys import rgb_to_hsv
+    hsv = np.zeros_like(img_f)
+    for r in range(H):
+        for c in range(W):
+            hsv[r,c] = rgb_to_hsv(img_f[r,c,0], img_f[r,c,1], img_f[r,c,2])
+    for ch in range(3):
+        flat_ch = hsv[:,:,ch].ravel()[valid]
+        sums = np.bincount(flat_map[valid], weights=flat_ch, minlength=N)
+        means = sums / counts
+        sq_sums = np.bincount(flat_map[valid], weights=flat_ch**2, minlength=N)
+        stds = np.sqrt((sq_sums / counts - means**2).clip(min=0))
+        nf[:, d_idx] = means; nf[:, d_idx+1] = stds; d_idx += 2
+
+    # [12:14] Grayscale mean/std
+    gray = 0.299*img_f[:,:,0] + 0.587*img_f[:,:,1] + 0.114*img_f[:,:,2]
+    flat_g = gray.ravel()[valid]
+    g_sums = np.bincount(flat_map[valid], weights=flat_g, minlength=N)
+    g_means = g_sums / counts
+    g_sq = np.bincount(flat_map[valid], weights=flat_g**2, minlength=N)
+    g_stds = np.sqrt((g_sq / counts - g_means**2).clip(min=0))
+    nf[:, d_idx] = g_means; nf[:, d_idx+1] = g_stds; d_idx += 2
+
+    # [14:22] Geometry
+    nf[:, d_idx] = np.log1p(area); d_idx += 1
+    nf[:, d_idx] = ff[:,1] / area / W; d_idx += 1  # centroid_x
+    nf[:, d_idx] = ff[:,2] / area / H; d_idx += 1  # centroid_y
+    nf[:, d_idx] = (ff[:,10]-ff[:,9]) / W; d_idx += 1
+    nf[:, d_idx] = (ff[:,12]-ff[:,11]) / H; d_idx += 1
+    nf[:, d_idx] = ff[:,13] / area; d_idx += 1
     bbox_area = ((ff[:,10]-ff[:,9]+1)*(ff[:,12]-ff[:,11]+1)).clip(min=1)
-    nf[:, 12] = (area / bbox_area).clip(max=1)
-    nf[:, 13] = area / (H*W)
+    nf[:, d_idx] = (area / bbox_area).clip(max=1); d_idx += 1
+    nf[:, d_idx] = area / (H*W); d_idx += 1
 
-    # DINO features (384-dim) — map centroid to 14x14 patch grid
-    if dino_grid is not None:
-        cx = nf[:, 7]  # already normalized [0,1]
-        cy = nf[:, 8]
-        px = np.clip((cx * 14).astype(np.int32), 0, 13)
-        py = np.clip((cy * 14).astype(np.int32), 0, 13)
-        nf[:, 14:] = dino_grid[py, px, :].astype(np.float32)
+    # [22:28] RGB skewness + kurtosis (higher-order color stats)
+    for ch in range(3):
+        flat_ch = img_f[:,:,ch].ravel()[valid]
+        ch_means = nf[:, ch*2]  # already computed
+        ch_stds = nf[:, ch*2+1].clip(min=1e-6)
+        # Skewness: E[(x-mu)^3] / std^3
+        diff3 = (flat_ch - ch_means[flat_map[valid]])**3
+        skew_sum = np.bincount(flat_map[valid], weights=diff3, minlength=N)
+        nf[:, d_idx] = (skew_sum / counts) / (ch_stds**3 + 1e-8); d_idx += 1
+        # Kurtosis: E[(x-mu)^4] / std^4 - 3
+        diff4 = (flat_ch - ch_means[flat_map[valid]])**4
+        kurt_sum = np.bincount(flat_map[valid], weights=diff4, minlength=N)
+        nf[:, d_idx] = (kurt_sum / counts) / (ch_stds**4 + 1e-8) - 3.0; d_idx += 1
+
+    # [28:44] Grayscale histogram (16 bins)
+    n_bins = 16
+    gray_q = np.clip((flat_g * n_bins).astype(np.int32), 0, n_bins-1)
+    for b in range(n_bins):
+        mask_b = gray_q == b
+        nf[:, d_idx] = np.bincount(flat_map[valid][mask_b], minlength=N).astype(np.float32) / counts
+        d_idx += 1
+
+    # [44:52] Gradient features (magnitude mean/std + 6-bin direction histogram)
+    gy, gx = np.gradient(gray)
+    gmag = np.sqrt(gx**2 + gy**2)
+    gdir = np.arctan2(gy, gx)  # [-pi, pi]
+    flat_gmag = gmag.ravel()[valid]
+    mag_sums = np.bincount(flat_map[valid], weights=flat_gmag, minlength=N)
+    mag_means = mag_sums / counts
+    mag_sq = np.bincount(flat_map[valid], weights=flat_gmag**2, minlength=N)
+    mag_stds = np.sqrt((mag_sq / counts - mag_means**2).clip(min=0))
+    nf[:, d_idx] = mag_means; nf[:, d_idx+1] = mag_stds; d_idx += 2
+    # Direction histogram (6 bins over [-pi, pi])
+    n_dir = 6
+    flat_gdir = gdir.ravel()[valid]
+    dir_q = np.clip(((flat_gdir + np.pi) / (2*np.pi) * n_dir).astype(np.int32), 0, n_dir-1)
+    for b in range(n_dir):
+        mask_b = dir_q == b
+        nf[:, d_idx] = np.bincount(flat_map[valid][mask_b], minlength=N).astype(np.float32) / counts
+        d_idx += 1
+
+    # [52:68] Multi-scale spatial: which 4x4 grid cell does centroid fall in (16-dim one-hot-ish)
+    cx = nf[:, 15]; cy = nf[:, 16]  # normalized centroids
+    gx4 = np.clip((cx * 4).astype(np.int32), 0, 3)
+    gy4 = np.clip((cy * 4).astype(np.int32), 0, 3)
+    for r in range(4):
+        for c in range(4):
+            nf[:, d_idx] = ((gy4 == r) & (gx4 == c)).astype(np.float32); d_idx += 1
+
+    # [68:72] 2nd order moments (shape descriptors)
+    rows, cols = np.where(valid.reshape(H, W))  # pixel positions
+    flat_valid = flat_map.reshape(H, W)
+    pix_r = (rows / H).astype(np.float64)
+    pix_c = (cols / W).astype(np.float64)
+    node_ids = flat_valid[rows, cols]
+    cx_nodes = nf[:, 15].astype(np.float64)
+    cy_nodes = nf[:, 16].astype(np.float64)
+    dr = pix_r - cy_nodes[node_ids]; dc = pix_c - cx_nodes[node_ids]
+    nf[:, d_idx] = np.bincount(node_ids, weights=dr**2, minlength=N).astype(np.float32) / counts; d_idx += 1  # Ixx
+    nf[:, d_idx] = np.bincount(node_ids, weights=dc**2, minlength=N).astype(np.float32) / counts; d_idx += 1  # Iyy
+    nf[:, d_idx] = np.bincount(node_ids, weights=dr*dc, minlength=N).astype(np.float32) / counts; d_idx += 1  # Ixy
+    nf[:, d_idx] = np.sqrt(nf[:, d_idx-3]**2 + nf[:, d_idx-2]**2).clip(min=1e-8); d_idx += 1  # moment magnitude
 
     nf = np.nan_to_num(nf, nan=0.0, posinf=1.0, neginf=-1.0)
-
     return Data(x=torch.from_numpy(nf), edge_index=torch.tensor(np.stack([s,d]), dtype=torch.long), num_nodes=N)
 
 
@@ -238,7 +337,7 @@ def main():
     parser.add_argument("--dataset", required=True, choices=["cifar10", "stl10", "tinyimagenet"])
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--hid", type=int, default=384)
+    parser.add_argument("--hid", type=int, default=256)
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -258,10 +357,10 @@ def main():
     # Use --unlabeled flag to pretrain on STL-10's 100K unlabeled split
     use_unlabeled = args.unlabeled and (args.dataset == "stl10")
 
-    # Cache key includes 'unlabeled' flag so cached graphs are separate
-    cache_tag = f"{args.dataset}_{args.n_train}_{args.n_test}_dino398" + ("_unlabeled" if use_unlabeled else "")
+    # Cache key — v3 uses raw pixel features only (no DINO)
+    cache_tag = f"{args.dataset}_{args.n_train}_{args.n_test}_raw{N_FEAT}" + ("_unlabeled" if use_unlabeled else "")
     ck = hashlib.md5(cache_tag.encode()).hexdigest()[:12]
-    cache_dir_shard = os.path.join(CACHE_DIR, f"graphs398_{ck}")
+    cache_dir_shard = os.path.join(CACHE_DIR, f"graphs{N_FEAT}_{ck}")
 
     if os.path.isdir(cache_dir_shard) and os.path.exists(os.path.join(cache_dir_shard, "meta.pt")):
         print(f"Loading cached sharded graphs: {cache_dir_shard}", flush=True)
@@ -330,48 +429,14 @@ def main():
             print(f"  Train: {n_tr}, Test: {n_te}", flush=True)
         print(f"  Images loaded in {time.time()-t0:.1f}s", flush=True)
 
-        # Step 2: DINO patch extraction (batched GPU)
-        print("Step 2: DINO extraction...", flush=True)
-        dino = torch.hub.load('facebookresearch/dino:main', 'dino_vits16', pretrained=True)
-        dino.eval().to(device)
-        dino_tf = transforms.Compose([
-            transforms.ToPILImage(), transforms.Resize((224,224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])])
-
-        def extract_dino_patches(images):
-            all_patches = np.zeros((len(images), 14, 14, 384), dtype=np.float16)
-            BS = 256
-            for i in range(0, len(images), BS):
-                batch_imgs = []
-                for img in images[i:i+BS]:
-                    if img.ndim == 2: img = np.stack([img]*3, axis=-1)
-                    batch_imgs.append(dino_tf(img))
-                inp = torch.stack(batch_imgs).to(device)
-                with torch.no_grad():
-                    tokens = dino.get_intermediate_layers(inp, n=1)[0]
-                    patches = tokens[:, 1:, :].reshape(-1, 14, 14, 384).cpu().numpy().astype(np.float16)
-                all_patches[i:i+len(batch_imgs)] = patches
-                if (i+BS) % 5000 < BS:
-                    print(f"    DINO: {min(i+BS, len(images))}/{len(images)}", flush=True)
-            return all_patches
-
-        if use_unlabeled:
-            un_patches = extract_dino_patches(un_imgs)
-            print(f"  DINO unlabeled done: {un_patches.shape}", flush=True)
-        tr_patches = extract_dino_patches(tr_imgs)
-        te_patches = extract_dino_patches(te_imgs)
-        del dino; torch.cuda.empty_cache()
-        print(f"  DINO done: train={tr_patches.shape}, test={te_patches.shape}", flush=True)
-
-        # Step 3: Build graphs with DINO (threaded CPU)
-        print("Step 3: Building 398-dim graphs...", flush=True)
+        # Step 2: Build graphs from raw pixels (NO pretrained models)
+        print(f"Step 2: Building {N_FEAT}-dim graphs from raw pixels...", flush=True)
         t0 = time.time()
 
-        def build_split(images, patches, labels_list):
+        def build_split(images, labels_list):
             graphs = []
             def proc(i):
-                g = build_graph_with_dino(images[i], kernel, patches[i])
+                g = build_graph(images[i], kernel)
                 return i, g
             with ThreadPoolExecutor(max_workers=16) as ex:
                 futures = {ex.submit(proc, i): i for i in range(len(images))}
@@ -388,16 +453,16 @@ def main():
             return [g for _, g in graphs]
 
         if use_unlabeled:
-            pretrain_graphs = build_split(un_imgs, un_patches, un_labels)
-            del un_imgs, un_patches
+            pretrain_graphs = build_split(un_imgs, un_labels)
+            del un_imgs
             print(f"  Pretrain graphs: {len(pretrain_graphs)}", flush=True)
-        train_graphs = build_split(tr_imgs, tr_patches, tr_labels)
-        test_graphs = build_split(te_imgs, te_patches, te_labels)
+        train_graphs = build_split(tr_imgs, tr_labels)
+        test_graphs = build_split(te_imgs, te_labels)
         train_labels = [g.y.item() for g in train_graphs]
         test_labels = [g.y.item() for g in test_graphs]
         if not use_unlabeled:
             pretrain_graphs = train_graphs
-        del tr_imgs, te_imgs, tr_patches, te_patches
+        del tr_imgs, te_imgs
         print(f"  Graphs built in {time.time()-t0:.1f}s: {len(pretrain_graphs)} pretrain, {len(train_graphs)} train, {len(test_graphs)} test", flush=True)
         print(f"  Feature dim: {train_graphs[0].x.shape[1]}, Nodes avg: {np.mean([g.num_nodes for g in pretrain_graphs]):.0f}", flush=True)
 
@@ -491,7 +556,7 @@ def main():
     with torch.no_grad(): acc_mlp = accuracy_score(y_te, mlp(torch.tensor(Xj_te, dtype=torch.float).to(device)).argmax(1).cpu().numpy())
 
     print(f"\nRESULTS — {args.dataset}", flush=True)
-    print(f"  Raw (398-dim) + LogReg:  {acc_r*100:.2f}%", flush=True)
+    print(f"  Raw ({N_FEAT}-dim) + LogReg:  {acc_r*100:.2f}%", flush=True)
     print(f"  JEPA + LogReg:           {acc_j*100:.2f}%", flush=True)
     print(f"  JEPA + MLP:              {acc_mlp*100:.2f}%", flush=True)
 

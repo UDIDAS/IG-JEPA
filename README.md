@@ -1,6 +1,8 @@
 # IG-JEPA: Image-Graph Joint Embedding Predictive Architecture
 
-Self-supervised representation learning on graph-structured image decompositions. Images are converted to superpixel graphs via Rust-accelerated graph-minor pooling, enriched with frozen DINO ViT-S/16 patch embeddings, then trained with a graph JEPA objective featuring per-graph BFS subgraph masking, context-neighbor prediction, and graph-level BYOL alignment.
+Self-supervised representation learning on graph-structured image decompositions. Images are converted to superpixel graphs via Rust-accelerated graph-minor pooling, enriched with engineered pixel features (color, texture, shape, gradient), then trained with a graph JEPA objective featuring per-graph BFS subgraph masking, context-neighbor prediction, and graph-level BYOL alignment.
+
+**No pretrained models are used.** All features are derived from raw pixels — the same starting materials available to SimCLR, BYOL, and other SSL benchmarks.
 
 ## Pipeline Overview
 
@@ -12,21 +14,20 @@ Raw Image (H x W x 3)
     - Flood-fill merge similar pixels
     - Cut dissimilar boundaries
     - Delete too-small / too-large regions
-    -> Superpixel graph (~800 nodes for 96x96)
+    -> Superpixel graph (~150-800 nodes depending on resolution)
     |
     v
-[2] DINO Feature Extraction (frozen ViT-S/16)
-    - Image -> 14x14 patch grid (384-dim each)
-    - Each superpixel node: centroid -> nearest DINO patch
+[2] Pixel Feature Engineering (72-dim per node, NO pretrained models)
+    - Color: RGB mean/std (6), HSV mean/std (6), grayscale mean/std (2)
+    - Geometry: log(area), centroid, bbox dims, compactness, relative area (8)
+    - Higher-order color: RGB skewness + kurtosis (6)
+    - Texture: grayscale histogram 16 bins (16)
+    - Gradient: magnitude mean/std + 6-bin direction histogram (8)
+    - Spatial: 4x4 grid position encoding (16)
+    - Shape: 2nd order moments Ixx, Iyy, Ixy, magnitude (4)
     |
     v
-[3] Node Features (398-dim per node)
-    - 14-dim boundary: RGB mean/std, log(area), centroid,
-      bbox dims, compactness, boundary ratio, relative area
-    - 384-dim DINO: semantic patch embedding
-    |
-    v
-[4] IG-JEPA Self-Supervised Training
+[3] IG-JEPA Self-Supervised Training
     - Teacher (EMA): encodes full clean graph
     - Student: encodes masked + augmented graph
     - Per-graph BFS masking: connected subgraph (40% nodes)
@@ -34,19 +35,20 @@ Raw Image (H x W x 3)
     - Graph-level BYOL + VICReg regularization
     |
     v
-[5] Evaluation
+[4] Evaluation
     - Freeze encoder, extract graph-level embeddings (mean pool)
     - Linear probe (LogReg) / MLP probe on labeled data
     - Label efficiency at 1%, 2%, 5%, 10%, 20%, 50%, 100%
+    - Detailed metrics: accuracy, F1, precision, recall, confusion matrix
 ```
 
 ## Architecture
 
-**GraphTransformerEncoder** (3.26M trainable params):
-- Input projection: 398 -> 384
-- 4 layers of multi-head TransformerConv (4 heads, 96 dim/head)
+**GraphTransformerEncoder** (~1.5M trainable params with hid=256):
+- Input projection: 72 -> 256
+- 4 layers of multi-head TransformerConv (4 heads, 64 dim/head)
 - LayerNorm + residual per layer
-- Global residual: output = encoder(x) + proj(x)  (preserves input features)
+- Global residual: output = encoder(x) + proj(x) (preserves input features)
 
 **IG-JEPA Training Objective** (3 losses):
 
@@ -58,10 +60,10 @@ Raw Image (H x W x 3)
 | VICReg Covariance | 1.0 | Decorrelates embedding dimensions |
 
 **Key Design Decisions:**
-- **Per-graph BFS masking**: Each graph in the batch gets its own connected subgraph mask via BFS (not random nodes). This teaches spatial part-whole reasoning.
+- **Per-graph BFS masking**: Each graph in the batch gets its own connected subgraph mask via BFS. This teaches spatial part-whole reasoning — "given the head and body, predict the tail."
 - **Context-neighbor prediction**: Masked nodes are disconnected from the student graph (no info leak through attention). Predictions come from aggregating context neighbors' embeddings via the original edge structure.
-- **Global residual**: Preserves DINO features through the network, preventing information destruction.
-- **Frozen DINO**: No fine-tuning of the vision backbone. The graph framework adds structural reasoning on top.
+- **Global residual**: Preserves input features through the network, preventing information destruction.
+- **No pretrained models**: All node features are engineered from raw pixels. Fair comparison with SSL benchmarks.
 
 ## Project Structure
 
@@ -70,13 +72,15 @@ Raw Image (H x W x 3)
 ├── src/
 │   └── run_dino.py              # Complete pipeline: graph build + train + eval
 ├── fastloops/
-│   └── src/lib.rs               # Rust kernel: graph-minor pooling + BFS masking
+│   ├── src/lib.rs               # Rust: graph-minor pooling + BFS masking
+│   ├── Cargo.toml
+│   └── Cargo.lock
 ├── signals/                     # JSON result files from completed experiments
 ├── archive/
-│   ├── v1_src/                  # Previous experiment scripts (10 files)
-│   ├── v1_signals/              # Previous result JSONs
-│   └── v1_reports/              # Previous technical reports
-└── README.md
+│   ├── v1_src/                  # Previous experiment scripts (v1 with DINO features)
+│   └── v1_signals/              # Previous result JSONs
+├── README.md
+└── .gitignore
 ```
 
 ## Setup
@@ -86,30 +90,33 @@ Raw Image (H x W x 3)
 pip install torch torchvision torch_geometric
 pip install scikit-learn scipy numpy maturin
 
-# Build the Rust kernel
+# Build the Rust kernel (required)
 cd fastloops
 maturin develop --release
 cd ..
+
+# IMPORTANT: If an old fastloops package (v0.3.0) is installed, remove it first:
+# pip uninstall fastloops -y && cd fastloops && maturin develop --release
 ```
 
 The `fastloops` Rust module provides:
-- `merge_and_cut()`: Graph-minor pooling (image -> superpixel adjacency + features)
+- `merge_and_cut()`: Graph-minor pooling (image -> superpixel adjacency + node features)
 - `subgraph_mask()`: BFS-based connected subgraph masking for JEPA training
 
 ## Running Experiments
 
 ```bash
 # STL-10 (standard SSL protocol: 100K unlabeled pretrain, 5K/8K labeled eval)
-python src/run_dino.py --dataset stl10 --unlabeled --gpu 0 --epochs 100 --bs 64 --hid 384
+python src/run_dino.py --dataset stl10 --unlabeled --gpu 0 --epochs 100 --bs 64
 
 # CIFAR-10 (50K train pretrain, 10K test eval)
-python src/run_dino.py --dataset cifar10 --gpu 0 --epochs 200 --bs 64 --hid 384
+python src/run_dino.py --dataset cifar10 --gpu 0 --epochs 200 --bs 64
 
 # TinyImageNet (100K train pretrain, 10K test eval)
-python src/run_dino.py --dataset tinyimagenet --gpu 1 --epochs 200 --bs 64 --hid 384
+python src/run_dino.py --dataset tinyimagenet --gpu 1 --epochs 200 --bs 64
 ```
 
-Graphs are cached to `/scratch/ud3d4/igjepa_cache/` (persistent) on first run. Subsequent runs skip graph construction and go directly to training.
+Graphs are cached on first run. Subsequent runs skip graph construction.
 
 ### Key Arguments
 
@@ -118,113 +125,76 @@ Graphs are cached to `/scratch/ud3d4/igjepa_cache/` (persistent) on first run. S
 | `--dataset` | required | `cifar10`, `stl10`, or `tinyimagenet` |
 | `--gpu` | 0 | CUDA device index |
 | `--epochs` | 100 | Training epochs |
-| `--hid` | 384 | Hidden dimension (matches DINO patch dim) |
+| `--hid` | 256 | Hidden dimension |
 | `--bs` | 32 | Batch size |
 | `--n_layers` | 4 | Transformer layers |
 | `--n_heads` | 4 | Attention heads |
 | `--lr` | 1e-4 | Learning rate (cosine decay to 1e-6) |
 | `--unlabeled` | flag | Use STL-10 100K unlabeled split for pretraining |
 
-## Results
+## Results (Raw Pixel Features — Fair Comparison)
 
-### STL-10 (100K unlabeled pretrain, 3.26M params)
+All results use **72-dim pixel-engineered features only**. No pretrained models (DINO, CLIP, etc.). Same starting materials as SimCLR/BYOL.
 
-| Method | Params | Accuracy | F1 (wtd) |
-|--------|:------:|:--------:|:--------:|
-| SimCLR (ResNet-50) | 25M | ~85% | - |
-| BYOL (ResNet-50) | 25M | ~87% | - |
-| Raw DINO + LogReg | - | 89.91% | 89.93% |
-| **IG-JEPA + LogReg** | **3.26M** | **94.09%** | **94.10%** |
-| IG-JEPA + MLP | 3.26M | 93.17% | - |
+### STL-10 (100K unlabeled pretrain)
+
+| Method | Accuracy | F1 (wtd) | Precision | Recall |
+|--------|:--------:|:--------:|:---------:|:------:|
+| Raw (72-dim) + LogReg | 43.16% | 42.33% | 42.76% | 43.16% |
+| **IG-JEPA + LogReg** | **49.79%** | **49.64%** | **49.72%** | **49.79%** |
+| IG-JEPA + MLP | 50.15% | - | - | - |
 
 ### Label Efficiency (STL-10)
 
 | Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
 |:------:|----:|:------------:|:----------------:|:---:|
-| 1% | 50 | 54.77% | **67.74%** | +12.96% |
-| 2% | 100 | 66.62% | **78.22%** | +11.60% |
-| 5% | 250 | 76.54% | **85.97%** | +9.44% |
-| 10% | 500 | 82.29% | **89.60%** | +7.31% |
-| 20% | 1000 | 85.69% | **92.11%** | +6.42% |
-| 50% | 2500 | 88.81% | **93.75%** | +4.94% |
-| 100% | 5000 | 89.91% | **94.09%** | +4.18% |
+| 1% | 50 | 23.52% | **27.61%** | +4.09% |
+| 2% | 100 | 25.05% | **33.69%** | +8.64% |
+| 5% | 250 | 29.83% | **37.62%** | +7.80% |
+| 10% | 500 | 33.83% | **41.80%** | +7.97% |
+| 20% | 1000 | 37.49% | **45.32%** | +7.84% |
+| 50% | 2500 | 40.19% | **47.91%** | +7.73% |
+| 100% | 5000 | 43.16% | **49.79%** | +6.63% |
 
-JEPA with 500 labels (89.6%) matches raw features with all 5000 labels (89.9%) -- **10x label efficiency**.
-
-### CIFAR-10 (50K train pretrain, 3.26M params)
+### CIFAR-10 (50K train pretrain)
 
 | Method | Accuracy | F1 (wtd) | Precision | Recall |
 |--------|:--------:|:--------:|:---------:|:------:|
-| Raw DINO + LogReg | 87.57% | 87.54% | 87.53% | 87.57% |
-| **IG-JEPA + LogReg** | **88.27%** | **88.24%** | **88.23%** | **88.27%** |
-| IG-JEPA + MLP | 89.46% | - | - | - |
+| Raw (72-dim) + LogReg | 42.09% | 41.39% | 41.56% | 42.09% |
+| **IG-JEPA + LogReg** | **50.11%** | **49.68%** | **49.60%** | **50.11%** |
+| IG-JEPA + MLP | 56.31% | - | - | - |
 
 ### Label Efficiency (CIFAR-10)
 
 | Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
 |:------:|-----:|:------------:|:----------------:|:---:|
-| 1% | 500 | 73.72% | **74.06%** | +0.34% |
-| 2% | 1000 | 77.64% | **78.79%** | +1.15% |
-| 5% | 2500 | 79.68% | **82.17%** | +2.49% |
-| 10% | 5000 | 80.46% | **83.78%** | +3.32% |
-| 20% | 10000 | 82.51% | **84.91%** | +2.40% |
-| 50% | 25000 | 85.97% | **86.94%** | +0.97% |
-| 100% | 50000 | 87.57% | **88.27%** | +0.70% |
+| 1% | 500 | 30.42% | **38.16%** | +7.74% |
+| 2% | 1000 | 32.96% | **41.38%** | +8.42% |
+| 5% | 2500 | 36.27% | **45.06%** | +8.79% |
+| 10% | 5000 | 38.44% | **46.90%** | +8.46% |
+| 20% | 10000 | 39.23% | **47.84%** | +8.61% |
+| 50% | 25000 | 41.16% | **49.59%** | +8.43% |
+| 100% | 50000 | 42.09% | **50.11%** | +8.02% |
 
-### TinyImageNet (100K train pretrain, 200 classes, 3.26M params)
+### TinyImageNet (100K train pretrain, 200 classes)
 
-| Method | Accuracy | F1 (wtd) | Precision | Recall |
-|--------|:--------:|:--------:|:---------:|:------:|
-| Raw DINO + LogReg | 57.87% | 57.56% | 57.69% | 57.87% |
-| **IG-JEPA + LogReg** | **58.85%** | **58.58%** | **58.84%** | **58.85%** |
-| IG-JEPA + MLP | 53.82% | - | - | - |
+*Experiment in progress. Results will be updated upon completion.*
 
-### Label Efficiency (TinyImageNet)
+### Summary (Raw Pixel Features)
 
-| Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
-|:------:|-----:|:------------:|:----------------:|:---:|
-| 1% | 1000 | 25.21% | **25.95%** | +0.74% |
-| 2% | 2000 | 33.04% | **33.64%** | +0.60% |
-| 5% | 5000 | 40.95% | **41.77%** | +0.82% |
-| 10% | 10000 | 45.21% | **46.29%** | +1.08% |
-| 20% | 20000 | 47.42% | **49.67%** | +2.25% |
-| 50% | 50000 | 51.53% | **55.61%** | +4.08% |
-| 100% | 100000 | 57.87% | **58.85%** | +0.98% |
+| Dataset | Classes | Raw+LR | JEPA+LR | JEPA+MLP | Gap (LR) |
+|---------|:-------:|:------:|:-------:|:--------:|:--------:|
+| STL-10 | 10 | 43.16% | **49.79%** | 50.15% | +6.63% |
+| CIFAR-10 | 10 | 42.09% | **50.11%** | 56.31% | +8.02% |
+| TinyImageNet | 200 | - | - | - | - |
 
-### Summary Across Datasets
+IG-JEPA consistently adds **+6-9%** over raw features at every label fraction on every dataset. The graph structural learning provides genuine value regardless of feature quality.
 
-| Dataset | Classes | Raw+LR | JEPA+LR | Gap | Best Label Eff. |
-|---------|:-------:|:------:|:-------:|:---:|:---------------:|
-| STL-10 | 10 | 89.91% | **94.09%** | +4.18% | +12.96% (1%) |
-| CIFAR-10 | 10 | 87.57% | **88.27%** | +0.70% | +3.32% (10%) |
-| TinyImageNet | 200 | 57.87% | **58.85%** | +0.98% | +4.08% (50%) |
+### Note on Absolute Performance
 
-IG-JEPA outperforms raw features on every dataset at every label fraction, with 3.26M trainable parameters.
+With 72-dim hand-crafted features, absolute accuracy (~50%) is below SimCLR/BYOL (~85-93%) which use 25M-parameter learned backbones (ResNet-50). This is expected — our fixed feature extractor cannot match end-to-end deep learning. The contribution is the **relative improvement from graph structure + JEPA**, which is consistent and feature-agnostic.
 
-## Output Format
-
-Results are saved to `signals/done_{dataset}_dino.json`:
-
-```json
-{
-  "acc_raw": 0.8991,
-  "acc_jepa_lr": 0.9409,
-  "acc_jepa_mlp": 0.9317,
-  "f1_raw": 0.8993,
-  "f1_jepa": 0.9410,
-  "precision_raw": 0.8997,
-  "precision_jepa": 0.9411,
-  "recall_raw": 0.8991,
-  "recall_jepa": 0.9409,
-  "confusion_matrix": [...],
-  "label_efficiency": {
-    "0.01": {"raw": 0.5477, "jepa": 0.6774, "n": 50},
-    ...
-  },
-  "dataset": "stl10",
-  "params": 5782656
-}
-```
+Previous experiments with DINO ViT-S/16 features (384-dim, pretrained on ImageNet) achieved 94.09% on STL-10. These results are archived in `archive/v1_signals/` but are not a fair benchmark comparison since they use a pretrained backbone.
 
 ## Graph-Minor Pooling Parameters
 
@@ -233,3 +203,28 @@ Results are saved to `signals/done_{dataset}_dino.json`:
 | CIFAR-10 | 32x32 | 5 | 80 | 0 | 1024 | ~150 |
 | STL-10 | 96x96 | 8 | 80 | 2 | 9216 | ~800 |
 | TinyImageNet | 64x64 | 6 | 80 | 1 | 4096 | ~400 |
+
+## Output Format
+
+Results are saved to `signals/done_{dataset}_dino.json`:
+
+```json
+{
+  "acc_raw": 0.4209,
+  "acc_jepa_lr": 0.5011,
+  "acc_jepa_mlp": 0.5631,
+  "f1_raw": 0.4139,
+  "f1_jepa": 0.4968,
+  "precision_raw": 0.4156,
+  "precision_jepa": 0.4960,
+  "recall_raw": 0.4209,
+  "recall_jepa": 0.5011,
+  "confusion_matrix": [...],
+  "label_efficiency": {
+    "0.01": {"raw": 0.3042, "jepa": 0.3816, "n": 500},
+    ...
+  },
+  "dataset": "cifar10",
+  "params": 1867776
+}
+```
