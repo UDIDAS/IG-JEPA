@@ -210,8 +210,6 @@ All published SSL benchmarks below use **ResNet-18** backbones (~11M params) tra
 | **IG-JEPA + LogReg** | **GraphTransformer** | **~1.5M** | **14.14%** | **Ours** |
 | **IG-JEPA + MLP** | **GraphTransformer** | **~1.5M** | **17.25%** | **Ours** |
 
-### Summary & What We Beat
-
 #### Label Efficiency (TinyImageNet)
 
 | Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
@@ -224,13 +222,21 @@ All published SSL benchmarks below use **ResNet-18** backbones (~11M params) tra
 | 50% | 50000 | 8.41% | **13.22%** | +4.81% |
 | 100% | 100000 | 8.95% | **14.14%** | +5.19% |
 
-### Summary & What We Beat
+### Comparison Against Current Best
 
-| Dataset | Classes | IG-JEPA (LR) | IG-JEPA (MLP) | vs Raw | Benchmarks Beaten |
-|---------|:-------:|:------------:|:-------------:|:------:|-------------------|
-| STL-10 | 10 | 49.79% | 50.15% | +6.63% | None (benchmarks: 82-90%) |
-| CIFAR-10 | 10 | 50.11% | 56.31% | +8.02% | None (benchmarks: 89-93%) |
-| TinyImageNet | 200 | 14.14% | 17.25% | +5.19% | None (benchmarks: 35-46%) |
+| Dataset | Current Best Method | Best Acc | Source | IG-JEPA (MLP) | Gap |
+|---------|-------------------|:--------:|--------|:-------------:|:---:|
+| STL-10 | SimSiam (ResNet-18, 11M params) | 90.04% | Chen & He, CVPR 2021 [6]; reported in [15] | 50.15% | -39.89% |
+| CIFAR-10 | MoCo v3 (ResNet-18, 11M params) | 93.10% | Chen et al., ICCV 2021 [8]; reported in [13] | 56.31% | -36.79% |
+| TinyImageNet | SimSiam (ResNet-18, 11M params) | 45.6% | Chen & He, CVPR 2021 [6]; reported in [12] | 17.25% | -28.35% |
+
+### Summary
+
+| Dataset | Classes | IG-JEPA (LR) | IG-JEPA (MLP) | vs Raw Features |
+|---------|:-------:|:------------:|:-------------:|:---------------:|
+| STL-10 | 10 | 49.79% | 50.15% | +6.63% |
+| CIFAR-10 | 10 | 50.11% | 56.31% | +8.02% |
+| TinyImageNet | 200 | 14.14% | 17.25% | +5.19% |
 
 **Honest assessment:**
 - With 72-dim hand-crafted features, we do **not** beat any published ResNet-18 SSL benchmark. These methods learn hierarchical features end-to-end with 11M parameters and ~800 training epochs, while we use fixed 72-dim features with ~1.5M params.
