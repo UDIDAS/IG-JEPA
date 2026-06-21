@@ -132,19 +132,28 @@ Graphs are cached on first run. Subsequent runs skip graph construction.
 | `--lr` | 1e-4 | Learning rate (cosine decay to 1e-6) |
 | `--unlabeled` | flag | Use STL-10 100K unlabeled split for pretraining |
 
-## Results (Raw Pixel Features — Fair Comparison)
+## Results
 
-All results use **72-dim pixel-engineered features only**. No pretrained models (DINO, CLIP, etc.). Same starting materials as SimCLR/BYOL.
+### Benchmark Context
 
-### STL-10 (100K unlabeled pretrain)
+All published SSL benchmarks below use **ResNet-18** backbones (~11M params) trained from scratch on each dataset. Our method uses a **GraphTransformer** (~1.5M params) with 72-dim pixel-engineered features. No pretrained models (DINO, CLIP, etc.) are used — same starting materials as all compared methods.
 
-| Method | Accuracy | F1 (wtd) | Precision | Recall |
-|--------|:--------:|:--------:|:---------:|:------:|
-| Raw (72-dim) + LogReg | 43.16% | 42.33% | 42.76% | 43.16% |
-| **IG-JEPA + LogReg** | **49.79%** | **49.64%** | **49.72%** | **49.79%** |
-| IG-JEPA + MLP | 50.15% | - | - | - |
+### STL-10 (100K unlabeled pretrain, linear probe on 5K/8K labeled)
 
-### Label Efficiency (STL-10)
+| Method | Backbone | Params | Accuracy | Source |
+|--------|----------|:------:|:--------:|--------|
+| DINO | ResNet-18 | 11M | ~82.0% | Caron et al., ICCV 2021 [7] |
+| MoCo v2 | ResNet-18 | 11M | ~83.6% | Chen et al., 2020 [2] |
+| BYOL | ResNet-18 | 11M | ~88.6% | Grill et al., NeurIPS 2020 [3]; pNNCLR [15] |
+| SimCLR | ResNet-18 | 11M | ~89.3% | Chen et al., ICML 2020 [1]; pNNCLR [15] |
+| SimSiam | ResNet-18 | 11M | ~90.0% | Chen & He, CVPR 2021 [6]; pNNCLR [15] |
+| Raw (72-dim) + LogReg | - | - | 43.16% | Ours (no learning) |
+| **IG-JEPA + LogReg** | **GraphTransformer** | **~1.5M** | **49.79%** | **Ours** |
+| **IG-JEPA + MLP** | **GraphTransformer** | **~1.5M** | **50.15%** | **Ours** |
+
+**Note:** Our 72-dim hand-crafted features cannot match learned ResNet-18 features. The gap is expected — we use a fixed feature extractor while benchmarks learn hierarchical features end-to-end. See "What We Beat" below.
+
+#### Label Efficiency (STL-10)
 
 | Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
 |:------:|----:|:------------:|:----------------:|:---:|
@@ -156,15 +165,24 @@ All results use **72-dim pixel-engineered features only**. No pretrained models 
 | 50% | 2500 | 40.19% | **47.91%** | +7.73% |
 | 100% | 5000 | 43.16% | **49.79%** | +6.63% |
 
-### CIFAR-10 (50K train pretrain)
+### CIFAR-10 (50K train pretrain, linear probe on 10K test)
 
-| Method | Accuracy | F1 (wtd) | Precision | Recall |
-|--------|:--------:|:--------:|:---------:|:------:|
-| Raw (72-dim) + LogReg | 42.09% | 41.39% | 41.56% | 42.09% |
-| **IG-JEPA + LogReg** | **50.11%** | **49.68%** | **49.60%** | **50.11%** |
-| IG-JEPA + MLP | 56.31% | - | - | - |
+| Method | Backbone | Params | Accuracy | Source |
+|--------|----------|:------:|:--------:|--------|
+| DINO | ResNet-18 | 11M | 89.19% | Caron et al., ICCV 2021 [7]; CueCo [13] |
+| SwAV | ResNet-18 | 11M | 89.17% | Caron et al., NeurIPS 2020 [4]; CueCo [13] |
+| VICReg | ResNet-18 | 11M | 90.07% | Bardes et al., ICLR 2022 [9]; CueCo [13] |
+| SimSiam | ResNet-18 | 11M | 90.51% | Chen & He, CVPR 2021 [6]; CueCo [13] |
+| SimCLR | ResNet-18 | 11M | 90.74% | Chen et al., ICML 2020 [1]; CueCo [13] |
+| Barlow Twins | ResNet-18 | 11M | 92.10% | Zbontar et al., ICML 2021 [5]; CueCo [13] |
+| BYOL | ResNet-18 | 11M | 92.61% | Grill et al., NeurIPS 2020 [3]; CueCo [13] |
+| MoCo v2 | ResNet-18 | 11M | 92.94% | Chen et al., 2020 [2]; CueCo [13] |
+| MoCo v3 | ResNet-18 | 11M | 93.10% | Chen et al., ICCV 2021 [8]; CueCo [13] |
+| Raw (72-dim) + LogReg | - | - | 42.09% | Ours (no learning) |
+| **IG-JEPA + LogReg** | **GraphTransformer** | **~1.5M** | **50.11%** | **Ours** |
+| **IG-JEPA + MLP** | **GraphTransformer** | **~1.5M** | **56.31%** | **Ours** |
 
-### Label Efficiency (CIFAR-10)
+#### Label Efficiency (CIFAR-10)
 
 | Labels | N | Raw + LogReg | IG-JEPA + LogReg | Gap |
 |:------:|-----:|:------------:|:----------------:|:---:|
@@ -178,23 +196,37 @@ All results use **72-dim pixel-engineered features only**. No pretrained models 
 
 ### TinyImageNet (100K train pretrain, 200 classes)
 
-*Experiment in progress. Results will be updated upon completion.*
+| Method | Backbone | Params | Accuracy | Source |
+|--------|----------|:------:|:--------:|--------|
+| VICReg | ResNet-18 | 11M | 37.5% | Bardes et al., ICLR 2022 [9]; FroSSL [12] |
+| DINO | ResNet-18 | 11M | 34.9% | Caron et al., ICCV 2021 [7]; FroSSL [12] |
+| BYOL | ResNet-18 | 11M | 40.1% | Grill et al., NeurIPS 2020 [3]; FroSSL [12] |
+| SwAV | ResNet-18 | 11M | 41.2% | Caron et al., NeurIPS 2020 [4]; FroSSL [12] |
+| SimCLR | ResNet-18 | 11M | 41.9% | Chen et al., ICML 2020 [1]; FroSSL [12] |
+| MoCo v2 | ResNet-18 | 11M | 41.9% | Chen et al., 2020 [2]; FroSSL [12] |
+| Barlow Twins | ResNet-18 | 11M | 45.3% | Zbontar et al., ICML 2021 [5]; FroSSL [12] |
+| SimSiam | ResNet-18 | 11M | 45.6% | Chen & He, CVPR 2021 [6]; FroSSL [12] |
+| Raw (72-dim) + LogReg | - | - | *pending* | Ours (no learning) |
+| **IG-JEPA + LogReg** | **GraphTransformer** | **~1.5M** | ***pending*** | **Ours** |
 
-### Summary (Raw Pixel Features)
+*TinyImageNet experiment in progress.*
 
-| Dataset | Classes | Raw+LR | JEPA+LR | JEPA+MLP | Gap (LR) |
-|---------|:-------:|:------:|:-------:|:--------:|:--------:|
-| STL-10 | 10 | 43.16% | **49.79%** | 50.15% | +6.63% |
-| CIFAR-10 | 10 | 42.09% | **50.11%** | 56.31% | +8.02% |
-| TinyImageNet | 200 | - | - | - | - |
+### Summary & What We Beat
 
-IG-JEPA consistently adds **+6-9%** over raw features at every label fraction on every dataset. The graph structural learning provides genuine value regardless of feature quality.
+| Dataset | Classes | IG-JEPA Acc | vs Raw Features | Benchmarks Beaten |
+|---------|:-------:|:-----------:|:---------------:|-------------------|
+| STL-10 | 10 | 49.79% | +6.63% | None (SimCLR ~89%, BYOL ~89%) |
+| CIFAR-10 | 10 | 50.11% | +8.02% | None (SimCLR ~91%, MoCo v3 ~93%) |
+| TinyImageNet | 200 | *pending* | *pending* | *Pending — benchmarks are 35-46%* |
 
-### Note on Absolute Performance
+**Honest assessment:**
+- With 72-dim hand-crafted features, we do **not** beat any published ResNet-18 SSL benchmark on STL-10 or CIFAR-10. These methods learn hierarchical features end-to-end with 11M parameters, while we use fixed 72-dim features with ~1.5M params.
+- On **TinyImageNet**, published benchmarks range from 34.9% (DINO) to 45.6% (SimSiam) with strong augmentation sensitivity. Our results are pending but may be competitive given the weaker baselines.
+- The **consistent +6-9% improvement** of IG-JEPA over raw features demonstrates that graph structural learning adds genuine value. This improvement is feature-agnostic and could compound with stronger input features.
 
-With 72-dim hand-crafted features, absolute accuracy (~50%) is below SimCLR/BYOL (~85-93%) which use 25M-parameter learned backbones (ResNet-50). This is expected — our fixed feature extractor cannot match end-to-end deep learning. The contribution is the **relative improvement from graph structure + JEPA**, which is consistent and feature-agnostic.
+### With DINO Features (Archived — Not Fair Comparison)
 
-Previous experiments with DINO ViT-S/16 features (384-dim, pretrained on ImageNet) achieved 94.09% on STL-10. These results are archived in `archive/v1_signals/` but are not a fair benchmark comparison since they use a pretrained backbone.
+When using frozen DINO ViT-S/16 features (384-dim, pretrained on ImageNet) instead of raw pixel features, IG-JEPA achieved **94.09%** on STL-10 — exceeding SimSiam (~90%), SimCLR (~89%), and BYOL (~89%). However, this comparison is not fair since DINO was pretrained on 1.2M ImageNet images while the benchmarks learn from scratch. These results are archived in `archive/v1_signals/`.
 
 ## Graph-Minor Pooling Parameters
 
@@ -228,3 +260,35 @@ Results are saved to `signals/done_{dataset}_dino.json`:
   "params": 1867776
 }
 ```
+
+## References
+
+[1] Chen, T., Kornblith, S., Norouzi, M., & Hinton, G. "A Simple Framework for Contrastive Learning of Visual Representations." ICML 2020. arXiv:2002.05709.
+
+[2] Chen, X., Fan, H., Girshick, R., & He, K. "Improved Baselines with Momentum Contrastive Learning." arXiv:2003.04297, 2020.
+
+[3] Grill, J-B., Strub, F., Altché, F., et al. "Bootstrap Your Own Latent: A New Approach to Self-Supervised Learning." NeurIPS 2020. arXiv:2006.07733.
+
+[4] Caron, M., Misra, I., Mairal, J., et al. "Unsupervised Learning of Visual Features by Contrasting Cluster Assignments." NeurIPS 2020.
+
+[5] Zbontar, J., Jing, L., Misra, I., LeCun, Y., & Deny, S. "Barlow Twins: Self-Supervised Learning via Redundancy Reduction." ICML 2021. arXiv:2103.03230.
+
+[6] Chen, X. & He, K. "Exploring Simple Siamese Representation Learning." CVPR 2021. arXiv:2011.10566.
+
+[7] Caron, M., Touvron, H., Misra, I., et al. "Emerging Properties in Self-Supervised Vision Transformers." ICCV 2021. arXiv:2104.14294.
+
+[8] Chen, X., Xie, S., & He, K. "An Empirical Study of Training Self-Supervised Vision Transformers." ICCV 2021. arXiv:2104.02057.
+
+[9] Bardes, A., Ponce, J., & LeCun, Y. "VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning." ICLR 2022. arXiv:2105.04906.
+
+[10] He, K., Chen, X., Xie, S., et al. "Masked Autoencoders Are Scalable Vision Learners." CVPR 2022. arXiv:2111.06377.
+
+[11] Assran, M., Duval, Q., Misra, I., et al. "Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture." CVPR 2023. arXiv:2301.08243.
+
+[12] Halvagal, M.S. & Bhatt, D. "FroSSL: Frobenius Norm Minimization for Efficient Multiview Self-Supervised Learning." arXiv:2310.02903, 2023.
+
+[13] Giakoumoglou, N., et al. "Cluster Contrast for Unsupervised Visual Representation Learning." arXiv:2507.12359, 2025.
+
+[14] Zheng, M., et al. "ReSSL: Relational Self-Supervised Learning with Weak Augmentation." NeurIPS 2021. arXiv:2107.09282.
+
+[15] "Stochastic Pseudo Neighborhoods for Contrastive Learning." arXiv:2308.06983, 2023.
