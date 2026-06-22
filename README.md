@@ -129,65 +129,29 @@ python src/run_cnn_jepa.py --dataset cifar10 --gpu 1 --epochs 200 --bs 256 --lr 
 python src/run_cnn_jepa.py --dataset tinyimagenet --gpu 0 --epochs 200 --bs 128 --lr 1e-3
 ```
 
-## Results
+## Results by Dataset
 
-### Published SSL Benchmarks (ResNet-18, ~11M params, from scratch)
+All published benchmarks use **ResNet-18** (~11M params) trained from scratch on each dataset.
 
-**CIFAR-10** — Source: Giakoumoglou et al., "Cluster Contrast," arXiv:2507.12359, 2025 [13]
+---
 
-| Method | Accuracy | Citation |
-|--------|:--------:|---------|
-| SwAV | 89.17% | Caron et al., NeurIPS 2020 [4] |
-| DINO | 89.19% | Caron et al., ICCV 2021 [7] |
-| VICReg | 90.07% | Bardes et al., ICLR 2022 [9] |
-| SimSiam | 90.51% | Chen & He, CVPR 2021 [6] |
-| SimCLR | 90.74% | Chen et al., ICML 2020 [1] |
-| Barlow Twins | 92.10% | Zbontar et al., ICML 2021 [5] |
-| BYOL | 92.61% | Grill et al., NeurIPS 2020 [3] |
-| MoCo v2 | 92.94% | Chen et al., 2020 [2] |
-| **MoCo v3** | **93.10%** | **Chen et al., ICCV 2021 [8]** |
+### STL-10
 
-**STL-10** — Source: pNNCLR, arXiv:2308.06983, 2023 [15]
+Protocol: Pretrain on 100K unlabeled, linear probe on 5K labeled train, eval on 8K labeled test.
 
-| Method | Accuracy | Citation |
-|--------|:--------:|---------|
-| DINO | ~82.0% | Caron et al., ICCV 2021 [7] |
-| MoCo v2 | ~83.6% | Chen et al., 2020 [2] |
-| BYOL | ~88.6% | Grill et al., NeurIPS 2020 [3] |
-| SimCLR | ~89.3% | Chen et al., ICML 2020 [1] |
-| **SimSiam** | **~90.0%** | **Chen & He, CVPR 2021 [6]** |
+**Accuracy comparison:**
 
-**TinyImageNet** — Source: FroSSL, arXiv:2310.02903, 2023 [12]
+| Method | Backbone | Params | Accuracy | Source |
+|--------|----------|:------:|:--------:|--------|
+| DINO | ResNet-18 | 11M | ~82.0% | [7] |
+| MoCo v2 | ResNet-18 | 11M | ~83.6% | [2]; [15] |
+| BYOL | ResNet-18 | 11M | ~88.6% | [3]; [15] |
+| SimCLR | ResNet-18 | 11M | ~89.3% | [1]; [15] |
+| **SimSiam (SOTA)** | **ResNet-18** | **11M** | **~90.0%** | **[6]; [15]** |
+| IG-JEPA P1 (raw pixels) | GraphTransformer | 1.5M | 49.79% | Ours |
+| **IG-JEPA P2 (CNN+Graph)** | **ResNet-18 + GraphTransformer** | **17M** | ***in progress*** | **Ours** |
 
-| Method | Accuracy | Citation |
-|--------|:--------:|---------|
-| DINO | 34.9% | Caron et al., ICCV 2021 [7] |
-| VICReg | 37.5% | Bardes et al., ICLR 2022 [9] |
-| BYOL | 40.1% | Grill et al., NeurIPS 2020 [3] |
-| SimCLR | 41.9% | Chen et al., ICML 2020 [1] |
-| MoCo v2 | 41.9% | Chen et al., 2020 [2] |
-| Barlow Twins | 45.3% | Zbontar et al., ICML 2021 [5] |
-| **SimSiam** | **45.6%** | **Chen & He, CVPR 2021 [6]** |
-
-### Our Results: Pipeline 1 (Raw Pixel Features, ~1.5M params)
-
-| Dataset | Raw+LR | IG-JEPA+LR | IG-JEPA+MLP | Gap (LR) |
-|---------|:------:|:----------:|:-----------:|:--------:|
-| STL-10 | 43.16% | 49.79% | 50.15% | +6.63% |
-| CIFAR-10 | 42.09% | 50.11% | 56.31% | +8.02% |
-| TinyImageNet | 8.95% | 14.14% | 17.25% | +5.19% |
-
-Graph JEPA adds +5-9% over raw features consistently. Does not beat ResNet-18 benchmarks (72-dim hand-crafted features vs 512-dim learned features).
-
-### Our Results: Pipeline 2 (CNN + Graph JEPA, ~17M params)
-
-*Experiments in progress on both GPUs. ResNet-18 backbone + GraphTransformer JEPA, trained end-to-end.*
-
-*Target: beat SimSiam ~90% (STL-10), MoCo v3 ~93% (CIFAR-10) with same backbone.*
-
-### Label Efficiency (Pipeline 1 — Raw Pixel Features)
-
-**STL-10:**
+**Label efficiency (Pipeline 1 — raw pixel features):**
 
 | Labels | N | Raw+LR | JEPA+LR | Gap |
 |:------:|----:|:------:|:-------:|:---:|
@@ -199,7 +163,29 @@ Graph JEPA adds +5-9% over raw features consistently. Does not beat ResNet-18 be
 | 50% | 2500 | 40.19% | **47.91%** | +7.73% |
 | 100% | 5000 | 43.16% | **49.79%** | +6.63% |
 
-**CIFAR-10:**
+---
+
+### CIFAR-10
+
+Protocol: Pretrain on 50K train (self-supervised), linear probe eval on 10K test.
+
+**Accuracy comparison:**
+
+| Method | Backbone | Params | Accuracy | Source |
+|--------|----------|:------:|:--------:|--------|
+| SwAV | ResNet-18 | 11M | 89.17% | [4]; [13] |
+| DINO | ResNet-18 | 11M | 89.19% | [7]; [13] |
+| VICReg | ResNet-18 | 11M | 90.07% | [9]; [13] |
+| SimSiam | ResNet-18 | 11M | 90.51% | [6]; [13] |
+| SimCLR | ResNet-18 | 11M | 90.74% | [1]; [13] |
+| Barlow Twins | ResNet-18 | 11M | 92.10% | [5]; [13] |
+| BYOL | ResNet-18 | 11M | 92.61% | [3]; [13] |
+| MoCo v2 | ResNet-18 | 11M | 92.94% | [2]; [13] |
+| **MoCo v3 (SOTA)** | **ResNet-18** | **11M** | **93.10%** | **[8]; [13]** |
+| IG-JEPA P1 (raw pixels) | GraphTransformer | 1.5M | 50.11% | Ours |
+| **IG-JEPA P2 (CNN+Graph)** | **ResNet-18 + GraphTransformer** | **17M** | ***in progress*** | **Ours** |
+
+**Label efficiency (Pipeline 1 — raw pixel features):**
 
 | Labels | N | Raw+LR | JEPA+LR | Gap |
 |:------:|-----:|:------:|:-------:|:---:|
@@ -211,7 +197,28 @@ Graph JEPA adds +5-9% over raw features consistently. Does not beat ResNet-18 be
 | 50% | 25000 | 41.16% | **49.59%** | +8.43% |
 | 100% | 50000 | 42.09% | **50.11%** | +8.02% |
 
-**TinyImageNet:**
+---
+
+### TinyImageNet
+
+Protocol: Pretrain on 100K train (self-supervised), linear probe eval on 10K validation. 200 classes.
+
+**Accuracy comparison:**
+
+| Method | Backbone | Params | Accuracy | Source |
+|--------|----------|:------:|:--------:|--------|
+| DINO | ResNet-18 | 11M | 34.9% | [7]; [12] |
+| VICReg | ResNet-18 | 11M | 37.5% | [9]; [12] |
+| BYOL | ResNet-18 | 11M | 40.1% | [3]; [12] |
+| SwAV | ResNet-18 | 11M | 41.2% | [4]; [12] |
+| SimCLR | ResNet-18 | 11M | 41.9% | [1]; [12] |
+| MoCo v2 | ResNet-18 | 11M | 41.9% | [2]; [12] |
+| Barlow Twins | ResNet-18 | 11M | 45.3% | [5]; [12] |
+| **SimSiam (SOTA)** | **ResNet-18** | **11M** | **45.6%** | **[6]; [12]** |
+| IG-JEPA P1 (raw pixels) | GraphTransformer | 1.5M | 14.14% | Ours |
+| **IG-JEPA P2 (CNN+Graph)** | **ResNet-18 + GraphTransformer** | **17M** | ***pending*** | **Ours** |
+
+**Label efficiency (Pipeline 1 — raw pixel features):**
 
 | Labels | N | Raw+LR | JEPA+LR | Gap |
 |:------:|-----:|:------:|:-------:|:---:|
